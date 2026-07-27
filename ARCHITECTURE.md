@@ -300,3 +300,24 @@ reporting, no account, no default relay logging; reproducible builds.
   value rather than adapting — acceptable for now since it only under-constrains the relay's
   own return-traffic scheduling, never the client's. Symmetric relay-initiated probing
   (already flagged as future work) would close this gap.
+- **Fixed two real bugs in Tier 3/4's fastest-path tie-breaking, found by a real CI run, not
+  code inspection.** First: a homogeneous two-path CI run showed `hol-aware` at roughly half
+  of `round-robin`'s throughput. Root cause: a strict single-winner RTT comparison let one
+  path permanently absorb 100% of traffic, because `core/cc`'s congestion window is a
+  passive estimate of what a path has actually been asked to carry (see the simplified-BBR
+  entry above) — the idle second path's window never signaled "full," so nothing ever gave
+  it anything to prove itself against. Fixed by having `fastestTiedSet` treat paths within a
+  small RTT tolerance as tied and round-robin among them (`core/sched/tier3_min_rtt_cwnd.go`
+  and `tier4_hol_aware.go`), which also fixes the identical latent issue in Tier 3.
+  Second, surfaced immediately by the first fix: the relay side never actively probes (see
+  the asymmetry entry above), so relay-side paths' `RTTMin()` is always the unmeasured
+  sentinel — `fastestTiedSet` returned an *empty* tied set in that case, and the fallback
+  path's own tie-breaking (`rtt < slowRTT` starting from the same sentinel) meant a
+  candidate whose RTT was itself the sentinel could never win either. Together these made
+  the relay-side scheduler return `nil` forever, and a real two-path tunnel's return traffic
+  stalled completely under `hol-aware`. Fixed by treating "every path is unmeasured" as a
+  trivial tie (all of them primary) and by tracking "found a candidate" separately from the
+  RTT comparison in the fallback search. Both fixes are covered by unit tests that fail
+  without them (`TestHoLAwareSharesLoadAcrossEquallyFastPaths`,
+  `TestHoLAwareBothPathsUnmeasuredRTT`, and their Tier 3 equivalents) and were re-verified
+  against real running relay+client binaries in the netns rig after the fix.

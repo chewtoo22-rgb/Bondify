@@ -46,6 +46,52 @@ func TestHoLAwareUsesSlowPathWhenComparable(t *testing.T) {
 	}
 }
 
+func TestHoLAwareSharesLoadAcrossEquallyFastPaths(t *testing.T) {
+	// Regression test for the exact bug found in CI on a homogeneous two-path run:
+	// hol-aware measured roughly half of round-robin's throughput because it locked onto
+	// a single "fastest" path (ties always resolved to the same winner) and never gave a
+	// second, equally-fast, equally-idle path anything to carry.
+	paths := []Path{
+		&fakePath{id: 0, state: StateActive, role: RoleBond, inflight: 0, cwnd: 100, rttMin: 20 * time.Millisecond},
+		&fakePath{id: 1, state: StateActive, role: RoleBond, inflight: 0, cwnd: 100, rttMin: 20 * time.Millisecond},
+	}
+	h := NewHoLAware()
+	seen := map[uint8]int{}
+	for i := 0; i < 6; i++ {
+		p := h.Next(paths, 100)
+		if p == nil {
+			t.Fatal("expected a path, got nil")
+		}
+		seen[p.ID()]++
+	}
+	if seen[0] == 0 || seen[1] == 0 {
+		t.Fatalf("expected both equally-fast paths to be used, got counts %v", seen)
+	}
+}
+
+func TestHoLAwareBothPathsUnmeasuredRTT(t *testing.T) {
+	// Regression test for a real bug found in CI: the relay side never actively probes
+	// (see core/bond/path.go's doc comment on the client/relay asymmetry), so relay-side
+	// paths' RTTMin() is always 0/unmeasured. fastestTiedSet used to return an empty
+	// primary set whenever the fastest sample itself was the unmeasuredRTT sentinel, which
+	// forced every call down the "nothing tied-for-fastest has room" branch even though
+	// both paths plainly had room -- and a second bug in that branch's tie-breaking
+	// (rtt < slowRTT is never true when both sides equal the sentinel) meant it silently
+	// returned nil forever afterward too. Reproduced for real: a two-path tunnel with
+	// hol-aware on the relay side stalled completely, sending zero return traffic.
+	paths := []Path{
+		&fakePath{id: 0, state: StateActive, role: RoleBond, inflight: 0, cwnd: 1 << 20, rttMin: 0},
+		&fakePath{id: 1, state: StateActive, role: RoleBond, inflight: 0, cwnd: 1 << 20, rttMin: 0},
+	}
+	h := NewHoLAware()
+	for i := 0; i < 5; i++ {
+		p := h.Next(paths, 100)
+		if p == nil {
+			t.Fatalf("call %d: expected a path, got nil (both paths have room and no RTT data)", i)
+		}
+	}
+}
+
 func TestHoLAwareLambdaDecayEnablesBorderlineSlowPath(t *testing.T) {
 	h := NewHoLAware()
 

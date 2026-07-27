@@ -2,6 +2,7 @@ package sched
 
 import (
 	"math"
+	"sync"
 	"time"
 )
 
@@ -11,30 +12,84 @@ import (
 // equally unmeasured, or as soon as it reports a real sample.
 const unmeasuredRTT = time.Duration(math.MaxInt64)
 
-// fastestByRTT returns the path with the lowest RTTMin() among paths, or nil if paths is
-// empty. Shared by Tier 3 and Tier 4, which both need "which path is fastest right now."
-func fastestByRTT(paths []Path) Path {
-	var best Path
-	bestRTT := unmeasuredRTT
+// tieRTTFactor/tieRTTMin define how close two paths' RTTMin() must be to count as "tied"
+// for fastest-path selection. Without a tie window, a strict single-winner comparison lets
+// one path permanently absorb 100% of traffic even when an equally capable path sits
+// completely idle: core/cc's congestion window is a passive estimate of what a path has
+// actually been asked to carry (see core/cc's doc comment on deferred PROBE_BW-style active
+// bandwidth probing), so the sole active path's InFlight()<CWND() check keeps reading
+// "room" forever -- there is no negative feedback that would ever make the scheduler try
+// the idle path, because it's never given anything to prove itself against. This was found
+// for real, not by inspection: on a homogeneous two-path CI run, Tier 4 measured roughly
+// half of Tier 1's throughput before this fix, because it never gave the second path
+// anything to carry at all. Treating near-tied paths as a set and round-robining within it
+// gives every equally-good path a genuine chance to be exercised.
+const (
+	tieRTTFactor = 1.15
+	tieRTTMin    = 2 * time.Millisecond
+)
+
+// fastestTiedSet returns the lowest RTTMin() among paths (unmeasuredRTT if paths is empty)
+// and every path within the tie window of it. When the fastest sample itself is
+// unmeasuredRTT -- no path in the set has a real RTT sample yet, e.g. every path on the
+// relay side, which never actively probes (see core/bond/path.go's doc comment on the
+// client/relay asymmetry) -- every path is trivially "tied": they're all equally unknown,
+// so all of them belong in the primary set and share load via round robin, exactly like a
+// genuine tie. Returning an empty primary set in that case (an earlier version of this
+// function did) was a real bug: it forced every caller down the "nothing tied-for-fastest
+// has room" path even when paths plainly did have room, and was caught only by a real CI
+// run stalling completely on the relay's always-unmeasured paths.
+func fastestTiedSet(paths []Path) (time.Duration, []Path) {
+	fastest := unmeasuredRTT
 	for _, p := range paths {
 		rtt := p.RTTMin()
 		if rtt <= 0 {
 			rtt = unmeasuredRTT
 		}
-		if best == nil || rtt < bestRTT {
-			best = p
-			bestRTT = rtt
+		if rtt < fastest {
+			fastest = rtt
 		}
 	}
-	return best
+	var window time.Duration
+	if fastest < unmeasuredRTT {
+		window = time.Duration(float64(fastest) * (tieRTTFactor - 1))
+		if window < tieRTTMin {
+			window = tieRTTMin
+		}
+	}
+	var primary []Path
+	for _, p := range paths {
+		rtt := p.RTTMin()
+		if rtt <= 0 {
+			rtt = unmeasuredRTT
+		}
+		if fastest >= unmeasuredRTT || rtt <= fastest+window {
+			primary = append(primary, p)
+		}
+	}
+	return fastest, primary
 }
 
-// MinRTTCwnd is Tier 3 (ARCHITECTURE.md §2.1): the classic MPTCP default. Always prefers
-// the lowest-RTT path with room in its congestion window. Better latency on homogeneous
-// paths; worse on heterogeneous ones, since once the fast path's window fills it dumps
-// straight onto whatever's next-fastest with room, however much slower that is -- exactly
-// the behavior Tier 4 exists to fix.
-type MinRTTCwnd struct{}
+// pathIn reports whether p (by ID) is present in set.
+func pathIn(set []Path, p Path) bool {
+	for _, q := range set {
+		if q.ID() == p.ID() {
+			return true
+		}
+	}
+	return false
+}
+
+// MinRTTCwnd is Tier 3 (ARCHITECTURE.md §2.1): the classic MPTCP default. Prefers the
+// lowest-RTT path(s) with room in their congestion window, round-robining among any that
+// are tied for fastest so equally-good paths share load instead of one perpetually
+// winning. Better latency on homogeneous paths; worse on genuinely heterogeneous ones,
+// since once the fast path's window fills it dumps straight onto whatever's next-fastest
+// with room, however much slower that is -- exactly the behavior Tier 4 exists to fix.
+type MinRTTCwnd struct {
+	mu     sync.Mutex
+	cursor int
+}
 
 func NewMinRTTCwnd() *MinRTTCwnd { return &MinRTTCwnd{} }
 
@@ -45,5 +100,18 @@ func (m *MinRTTCwnd) Next(paths []Path, size int) Path {
 	if len(elig) == 0 {
 		return nil
 	}
-	return fastestByRTT(elig)
+	_, primary := fastestTiedSet(elig)
+	if len(primary) == 0 {
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := len(primary)
+	if m.cursor >= n {
+		m.cursor = 0
+	}
+	p := primary[m.cursor]
+	m.cursor = (m.cursor + 1) % n
+	return p
 }

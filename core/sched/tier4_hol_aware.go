@@ -23,15 +23,18 @@ const (
 )
 
 // HoLAware is Tier 4 (ARCHITECTURE.md §2.1): a BLEST/ECF-style hybrid. Starts from Tier 3's
-// "prefer the fastest path" rule, but when the fastest path is at capacity, it doesn't
-// blindly dump onto whatever slower path has room (Tier 3's flaw) -- it estimates whether
-// sending on that slower path would actually *arrive* later than simply waiting for the
-// fast path to free a slot, and skips the slow path when so. Deliberately returning nil
-// here (idle capacity on a path that has room) is correct, not a bug: it's choosing to wait
-// rather than let one hopelessly slow path stall reassembly of everything behind it.
+// "prefer the fastest path(s)" rule -- round-robining among whatever is tied for fastest,
+// per fastestTiedSet's doc comment, so multiple equally-good paths actually share load. Only
+// when NOTHING tied-for-fastest has room does it consider a genuinely slower alternate: it
+// estimates whether sending on that slower path would actually *arrive* later than simply
+// waiting for the fast path to free a slot, and skips the slow path when so. Deliberately
+// returning nil here (idle capacity on a path that has room) is correct, not a bug: it's
+// choosing to wait rather than let one hopelessly slow path stall reassembly of everything
+// behind it.
 type HoLAware struct {
 	mu     sync.Mutex
 	lambda float64
+	cursor int
 }
 
 func NewHoLAware() *HoLAware { return &HoLAware{lambda: holLambdaInit} }
@@ -44,18 +47,42 @@ func (h *HoLAware) Next(paths []Path, size int) Path {
 		return nil
 	}
 
-	fastest := fastestByRTT(bond)
-	if fastest.InFlight() < fastest.CWND() {
-		// The fastest path has room -- no HoL tradeoff to make.
-		h.decay()
-		return fastest
+	fastestRTT, primary := fastestTiedSet(bond)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Round-robin among paths tied for fastest -- no HoL tradeoff to make as long as one
+	// of them has room.
+	n := len(primary)
+	if n > 0 {
+		if h.cursor >= n {
+			h.cursor = 0
+		}
+		for i := 0; i < n; i++ {
+			idx := (h.cursor + i) % n
+			p := primary[idx]
+			if p.InFlight() < p.CWND() {
+				h.cursor = idx + 1
+				if h.cursor >= n {
+					h.cursor = 0
+				}
+				h.decay()
+				return p
+			}
+		}
 	}
 
-	// Fastest is full. Find the fastest alternative that still has room.
+	// Nothing tied-for-fastest has room. Find the fastest genuinely-slower alternative
+	// that does. foundSlow is tracked separately from slowRTT's sentinel value: a lone
+	// candidate whose RTT is itself unmeasuredRTT must still be selectable (rtt < slowRTT
+	// is never true when both sides equal the sentinel, which silently dropped every
+	// candidate here before this fix).
 	var slow Path
 	slowRTT := unmeasuredRTT
+	foundSlow := false
 	for _, p := range bond {
-		if p.ID() == fastest.ID() {
+		if pathIn(primary, p) {
 			continue
 		}
 		if p.InFlight() >= p.CWND() {
@@ -65,18 +92,18 @@ func (h *HoLAware) Next(paths []Path, size int) Path {
 		if rtt <= 0 {
 			rtt = unmeasuredRTT
 		}
-		if rtt < slowRTT {
+		if !foundSlow || rtt < slowRTT {
 			slow = p
 			slowRTT = rtt
+			foundSlow = true
 		}
 	}
-	if slow == nil {
+	if !foundSlow {
 		return nil // nothing has room; caller queues and waits
 	}
 
-	fastRTT := fastest.RTTMin()
-	if fastRTT <= 0 {
-		// The fastest path is full but has no RTT estimate yet (e.g. it only just
+	if fastestRTT >= unmeasuredRTT {
+		// The tied-for-fastest set is full but has no RTT estimate yet (e.g. it only just
 		// finished JOINING) -- nothing to project against, so use the room that exists
 		// rather than guess.
 		h.decay()
@@ -84,16 +111,12 @@ func (h *HoLAware) Next(paths []Path, size int) Path {
 	}
 
 	// Should_use_slow_path (ARCHITECTURE.md §2.1): compare projected delivery time on the
-	// slow path against the cost of waiting for the fast path to free a slot. Waiting for
-	// the fast path costs roughly one more of its own RTTs (ack-clocked window growth);
+	// slow path against the cost of waiting for the fast set to free a slot. Waiting for
+	// the fast set costs roughly one more of its own RTTs (ack-clocked window growth);
 	// sending on the slow path now costs roughly its own RTT, scaled by lambda -- the
 	// adaptive strictness that rises when a skip was actually needed and decays otherwise.
-	h.mu.Lock()
-	lambda := h.lambda
-	h.mu.Unlock()
-
-	projectedWaitForFast := fastRTT
-	projectedSlow := time.Duration(lambda * float64(slowRTT))
+	projectedWaitForFast := fastestRTT
+	projectedSlow := time.Duration(h.lambda * float64(slowRTT))
 
 	if projectedSlow <= projectedWaitForFast {
 		h.decay()
@@ -103,9 +126,8 @@ func (h *HoLAware) Next(paths []Path, size int) Path {
 	return nil
 }
 
+// decay/raise assume h.mu is already held.
 func (h *HoLAware) decay() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.lambda *= holLambdaDecay
 	if h.lambda < holLambdaMin {
 		h.lambda = holLambdaMin
@@ -113,8 +135,6 @@ func (h *HoLAware) decay() {
 }
 
 func (h *HoLAware) raise() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.lambda *= holLambdaRaise
 	if h.lambda > holLambdaMax {
 		h.lambda = holLambdaMax
