@@ -39,6 +39,9 @@ type ClientConfig struct {
 	Paths        []PathSpec
 	HandshakeTO  time.Duration
 	HandshakeTry int
+	// Scheduler selects the scheduling tier (core/sched.New's names: "round-robin",
+	// "weighted-goodput", "min-rtt-cwnd", "hol-aware"). Empty defaults to round-robin.
+	Scheduler string
 }
 
 // DialClient performs the Noise_IK handshake on path 0, then registers any additional
@@ -132,6 +135,12 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 		return nil, HandshakeRespPayload{}, lastErr
 	}
 
+	scheduler, err := sched.New(cfg.Scheduler)
+	if err != nil {
+		_ = conn0.Close()
+		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: %w", err)
+	}
+
 	path0 := NewPath(0, conn0)
 	path0.SetActive() // handshake completion is path 0's implicit ack
 
@@ -143,7 +152,7 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 		tunnelIP:     respPayload.TunnelIP,
 		startedAt:    time.Now(),
 		mtu:          mtu,
-		sched:        sched.NewRoundRobin(),
+		sched:        scheduler,
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
 		paths:        []*Path{path0},
 	}
@@ -353,7 +362,7 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 		}
 		for i := 0; i < n; i++ {
 			payload := bufs[i][tun.IOOffset : tun.IOOffset+sizes[i]]
-			path := t.sched.Next(t.schedPaths())
+			path := t.sched.Next(t.schedPaths(), len(payload))
 			if path == nil {
 				continue // no eligible path right now; drop (queueing is a later refinement)
 			}

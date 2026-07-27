@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chewtoo22-rgb/bondify/core/cc"
 	"github.com/chewtoo22-rgb/bondify/core/sched"
 )
 
@@ -54,6 +55,8 @@ type Path struct {
 
 	inflight atomic.Int64
 
+	cc *cc.Controller
+
 	mu                       sync.Mutex
 	srtt                     time.Duration
 	rttVar                   time.Duration
@@ -64,6 +67,8 @@ type Path struct {
 	lastProbeSentPSN         uint32
 	lastProbeAckedPSN        uint32
 	lastProbeAckedRecvPSN    uint32
+	lastProbeAckedTxBytes    uint64
+	lastProbeAckTime         time.Time
 
 	Stats Stats
 }
@@ -75,7 +80,7 @@ type rttSample struct {
 
 // NewPath constructs a path in JOINING state. conn is nil on the relay side.
 func NewPath(id uint8, conn *net.UDPConn) *Path {
-	p := &Path{id: id, conn: conn}
+	p := &Path{id: id, conn: conn, cc: cc.NewController()}
 	p.role.Store(int32(sched.RoleBond))
 	p.state.Store(int32(sched.StateJoining))
 	return p
@@ -87,11 +92,18 @@ func (p *Path) State() sched.State { return sched.State(p.state.Load()) }
 func (p *Path) Role() sched.Role   { return sched.Role(p.role.Load()) }
 func (p *Path) InFlight() int64    { return p.inflight.Load() }
 
-// CWND is deliberately unbounded in phase 2: real per-path congestion control (BBR-style,
-// core/cc) is phase 3 scope. Returning a huge constant here rather than omitting the check
-// keeps sched.RoundRobin's cwnd-gating code path exercised now, so tier 3 only has to
-// plug in a real value later, not add the check.
-func (p *Path) CWND() int64 { return 1 << 62 }
+// CWND is core/cc's live BBR-style congestion window for this path (ARCHITECTURE.md
+// §2.4). Only the client side feeds it real samples today (see HandleProbeAck) -- the
+// relay's paths never call Sample (symmetric relay-initiated probing is deferred, per this
+// type's doc comment), so a relay-side path's CWND stays at cc's generous initial value
+// rather than adapting. That's an acceptable asymmetry for now: it only under-constrains
+// the relay's own return-traffic scheduling, never the client's.
+func (p *Path) CWND() int64 { return p.cc.CWND() }
+
+// Goodput is core/cc's windowed-max delivery-rate estimate in bytes/sec -- the same signal
+// congestion control uses, reused by sched.WeightedGoodput (Tier 2) so both consumers agree
+// on what a path is actually delivering.
+func (p *Path) Goodput() float64 { return p.cc.DeliveryRate() }
 
 func (p *Path) SetRole(r sched.Role) { p.role.Store(int32(r)) }
 
@@ -177,6 +189,23 @@ func (p *Path) HandleProbeAck(ack ProbeAckPayload, now time.Time) {
 	p.lastProbeAckedPSN = ack.SentPSN
 	p.lastProbeAckedRecvPSN = ack.RecvPSN
 
+	// Feed core/cc a delivery-rate sample for this interval: bytes sent since the last
+	// probe, scaled down by the same deltaRecv/deltaSent fraction just computed for loss,
+	// approximates bytes actually delivered (we have no per-packet ACK yet -- PROBE_ACK's
+	// PSN-delta reflection is the only delivery signal that exists today; see this
+	// function's loss comment above for why deltaSent==0 already gets handled). Elapsed
+	// time is wall-clock since the last PROBE_ACK, tracked separately from
+	// lastProbeAckAt (below), which RecordRecv also touches on every DATA/PROBE arrival
+	// and so can't double as "time of the last probe specifically."
+	txBytesNow := atomic.LoadUint64(&p.Stats.TxBytes)
+	if !p.lastProbeAckTime.IsZero() && deltaSent > 0 {
+		deltaBytes := txBytesNow - p.lastProbeAckedTxBytes
+		delivered := int64(float64(deltaBytes) * float64(deltaRecv) / float64(deltaSent))
+		p.cc.Sample(delivered, now.Sub(p.lastProbeAckTime), minRTT(p.rttSamples))
+	}
+	p.lastProbeAckedTxBytes = txBytesNow
+	p.lastProbeAckTime = now
+
 	p.consecutiveMissedProbes = 0
 	p.consecutiveHealthyProbes++
 	loss := p.lossEWMA
@@ -228,6 +257,20 @@ func (p *Path) RTTMin() time.Duration {
 	defer p.mu.Unlock()
 	samples := pruneOld(p.rttSamples, time.Now())
 	p.rttSamples = samples
+	return minRTT(samples)
+}
+
+func (p *Path) Loss() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lossEWMA
+}
+
+// minRTT returns the smallest rtt among samples, or 0 if samples is empty. Shared by
+// RTTMin (the public windowed-min-RTT accessor) and HandleProbeAck's cc.Controller.Sample
+// call (which needs the same "rt_prop" value but is already holding p.mu, so it can't call
+// RTTMin -- that would re-lock).
+func minRTT(samples []rttSample) time.Duration {
 	if len(samples) == 0 {
 		return 0
 	}
@@ -238,12 +281,6 @@ func (p *Path) RTTMin() time.Duration {
 		}
 	}
 	return min
-}
-
-func (p *Path) Loss() float64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.lossEWMA
 }
 
 func pruneOld(samples []rttSample, now time.Time) []rttSample {

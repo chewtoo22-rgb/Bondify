@@ -34,6 +34,7 @@ func main() {
 		natIface  = flag.String("nat-iface", "", "if set, enable ip_forward + MASQUERADE(pool -> this interface) for internet egress")
 		keepalive = flag.Int("keepalive", 15, "NAT keepalive interval seconds, pushed to clients")
 		diagAddr  = flag.String("diag-addr", "127.0.0.1:9091", "localhost address to serve live JSON diagnostics on, one entry per connected session (GET /api/v1/diagnostics); empty disables it")
+		scheduler = flag.String("scheduler", "round-robin", "scheduling tier for the relay's own return traffic: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
 	)
 	flag.Parse()
 
@@ -86,6 +87,7 @@ func main() {
 		DNS:        dns,
 		MTU:        *mtu,
 		KeepAlive:  *keepalive,
+		Scheduler:  *scheduler,
 	}, dev)
 	if err != nil {
 		log.Fatalf("relay: init: %v", err)

@@ -34,6 +34,7 @@ func main() {
 		extraRoutes = flag.String("routes", "", "comma-separated extra CIDRs to route via the tunnel")
 		localAddrs  = flag.String("local-addrs", "", "comma-separated local bind IPs, one per uplink/path; append @device to pin a path's egress interface (e.g. 10.60.0.1@wlan0,10.61.0.1@wwan0); omit for a single system-chosen-source path")
 		diagAddr    = flag.String("diag-addr", "127.0.0.1:9090", "localhost address to serve live JSON diagnostics on (GET /api/v1/diagnostics); empty disables it")
+		scheduler   = flag.String("scheduler", "round-robin", "scheduling tier: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
 	)
 	flag.Parse()
 
@@ -107,6 +108,7 @@ func main() {
 		RelayPubKey: relayPub,
 		ClientKey:   clientKey,
 		Paths:       paths,
+		Scheduler:   *scheduler,
 	}, dev, *mtu)
 	if err != nil {
 		log.Fatalf("client: handshake failed: %v", err)

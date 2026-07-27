@@ -1,6 +1,9 @@
 package sched
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 type fakePath struct {
 	id       uint8
@@ -8,13 +11,17 @@ type fakePath struct {
 	role     Role
 	inflight int64
 	cwnd     int64
+	rttMin   time.Duration
+	goodput  float64
 }
 
-func (p *fakePath) ID() uint8       { return p.id }
-func (p *fakePath) State() State    { return p.state }
-func (p *fakePath) Role() Role      { return p.role }
-func (p *fakePath) InFlight() int64 { return p.inflight }
-func (p *fakePath) CWND() int64     { return p.cwnd }
+func (p *fakePath) ID() uint8             { return p.id }
+func (p *fakePath) State() State          { return p.state }
+func (p *fakePath) Role() Role            { return p.role }
+func (p *fakePath) InFlight() int64       { return p.inflight }
+func (p *fakePath) CWND() int64           { return p.cwnd }
+func (p *fakePath) RTTMin() time.Duration { return p.rttMin }
+func (p *fakePath) Goodput() float64      { return p.goodput }
 
 func TestRoundRobinAlternates(t *testing.T) {
 	paths := []Path{
@@ -24,7 +31,7 @@ func TestRoundRobinAlternates(t *testing.T) {
 	rr := NewRoundRobin()
 	var seq []uint8
 	for i := 0; i < 6; i++ {
-		p := rr.Next(paths)
+		p := rr.Next(paths, 100)
 		if p == nil {
 			t.Fatal("expected a path, got nil")
 		}
@@ -47,7 +54,7 @@ func TestRoundRobinSkipsIneligible(t *testing.T) {
 	}
 	rr := NewRoundRobin()
 	for i := 0; i < 4; i++ {
-		p := rr.Next(paths)
+		p := rr.Next(paths, 100)
 		if p == nil {
 			t.Fatal("expected a path, got nil")
 		}
@@ -63,7 +70,7 @@ func TestRoundRobinNoneEligible(t *testing.T) {
 		&fakePath{id: 1, state: StateJoining, role: RoleBond, cwnd: 1 << 30},
 	}
 	rr := NewRoundRobin()
-	if p := rr.Next(paths); p != nil {
+	if p := rr.Next(paths, 100); p != nil {
 		t.Fatalf("expected nil, got path %d", p.ID())
 	}
 }
@@ -75,7 +82,7 @@ func TestRoundRobinRespectsCWND(t *testing.T) {
 	}
 	rr := NewRoundRobin()
 	for i := 0; i < 3; i++ {
-		p := rr.Next(paths)
+		p := rr.Next(paths, 100)
 		if p == nil || p.ID() != 1 {
 			t.Fatalf("expected path 1 (path 0 is at cwnd), got %v", p)
 		}
@@ -84,7 +91,23 @@ func TestRoundRobinRespectsCWND(t *testing.T) {
 
 func TestRoundRobinEmptySet(t *testing.T) {
 	rr := NewRoundRobin()
-	if p := rr.Next(nil); p != nil {
+	if p := rr.Next(nil, 100); p != nil {
 		t.Fatalf("expected nil for empty path set, got %v", p)
+	}
+}
+
+func TestSchedulerFactory(t *testing.T) {
+	for _, name := range []string{"", "round-robin", "weighted-goodput", "min-rtt-cwnd", "hol-aware"} {
+		s, err := New(name)
+		if err != nil {
+			t.Errorf("New(%q) error: %v", name, err)
+			continue
+		}
+		if s == nil {
+			t.Errorf("New(%q) returned nil scheduler", name)
+		}
+	}
+	if _, err := New("nonexistent-tier"); err == nil {
+		t.Error("New(\"nonexistent-tier\") expected an error, got nil")
 	}
 }

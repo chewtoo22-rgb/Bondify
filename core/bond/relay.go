@@ -26,6 +26,9 @@ type RelayConfig struct {
 	DNS        []string // pushed to clients via cfg_push
 	MTU        int
 	KeepAlive  int
+	// Scheduler selects the scheduling tier used for the relay's own return traffic
+	// (core/sched.New's names). Empty defaults to round-robin.
+	Scheduler string
 }
 
 type relaySession struct {
@@ -45,14 +48,21 @@ type relaySession struct {
 	Stats Stats
 }
 
-func newRelaySession(sessionIndex uint32, sess *crypto.Session, tunnelIP net.IP) *relaySession {
+func newRelaySession(sessionIndex uint32, sess *crypto.Session, tunnelIP net.IP, schedulerName string) *relaySession {
+	scheduler, err := sched.New(schedulerName)
+	if err != nil {
+		// Already validated once in NewRelay; an unknown name here would be a caller bug,
+		// not a runtime condition worth failing a session over. Fall back to the always-
+		// correct baseline rather than propagate an error deep into handshake handling.
+		scheduler = sched.NewRoundRobin()
+	}
 	return &relaySession{
 		sessionIndex: sessionIndex,
 		sess:         sess,
 		tunnelIP:     tunnelIP,
 		startedAt:    time.Now(),
 		paths:        make(map[uint8]*Path),
-		sched:        sched.NewRoundRobin(),
+		sched:        scheduler,
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
 	}
 }
@@ -104,6 +114,9 @@ type Relay struct {
 }
 
 func NewRelay(cfg RelayConfig, dev tun.Device) (*Relay, error) {
+	if _, err := sched.New(cfg.Scheduler); err != nil {
+		return nil, fmt.Errorf("bond: %w", err)
+	}
 	pool, err := NewIPPool(cfg.PoolCIDR)
 	if err != nil {
 		return nil, err
@@ -200,7 +213,7 @@ func (r *Relay) ServeTUN() error {
 			if sess == nil {
 				continue // no session owns this destination; drop
 			}
-			path := sess.sched.Next(sess.schedPaths())
+			path := sess.sched.Next(sess.schedPaths(), len(pkt))
 			if path == nil {
 				continue // no eligible path right now; drop
 			}
@@ -340,7 +353,7 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 		return
 	}
 
-	rs := newRelaySession(sessionIndex, sess, tunnelIP)
+	rs := newRelaySession(sessionIndex, sess, tunnelIP, r.cfg.Scheduler)
 	p0, _ := rs.getOrCreatePath(PathZero, src)
 	p0.SetActive()
 
