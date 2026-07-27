@@ -107,3 +107,5 @@ jobs:
         run: sudo -E env "PATH=$PATH" bash testbed/run.sh --ci
       - name: Run phase 2 gate (two-path aggregation, >80Mbps on 2x50mbit/20ms)
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase2.sh
+      - name: Run phase 3 gates (HoL gate, Tier 4 vs Tier 1 hetero/homo benchmark matrix)
+        run: sudo -E env "PATH=$PATH" bash testbed/run_phase3.sh

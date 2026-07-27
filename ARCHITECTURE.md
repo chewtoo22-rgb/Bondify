@@ -271,3 +271,32 @@ reporting, no account, no default relay logging; reproducible builds.
   new DATA sent, since a completed probe round trip is itself evidence the path currently
   works. See `core/bond/path.go`'s `HandleProbeAck` and README.md's Phase 2 section for how
   this was actually reproduced (not just reasoned about) before the fix.
+- **Tier 2's "deficit round robin" is implemented as smooth weighted round robin, not
+  literal DRR.** Classic DRR drains a per-flow packet queue: a flow's whole backlog gets
+  served (one quantum's worth of packets) before moving to the next flow's queue. BOND/1's
+  scheduler has no such per-path queue — `Next` is called once per already-dequeued TUN
+  packet and must return an immediate single-packet assignment — so there is nothing to
+  drain. `core/sched.WeightedGoodput` instead uses the Nginx-style smooth WRR algorithm
+  (each path's running current-weight is incremented by its goodput-derived weight every
+  call; the highest current-weight path is picked and debited by the sum of all weights),
+  which achieves the same long-run-share-proportional-to-weight goal with even
+  interleaving instead of DRR's characteristic same-path bursts — a better fit for a single
+  shared output stream. See `core/sched/tier2_weighted_goodput.go`'s doc comment.
+- **`core/cc`'s congestion control is a simplified BBR, not the full phase-cycling state
+  machine.** Real BBR cycles `pacing_gain` through STARTUP/DRAIN/PROBE_BW/PROBE_RTT phases,
+  driven by a per-RTT (often per-ACK) delivery-rate sample. BOND/1 has no per-packet ACK
+  yet — only periodic `PROBE`/`PROBE_ACK` round trips (`ProbeInterval` = 200ms) — so there
+  is no per-RTT signal to cycle a gain schedule against. `core/cc.Controller` uses a single
+  fixed gain (2.0, matching the spec's formula) over a windowed max-filtered delivery-rate
+  estimate instead, which captures the core formula (`cwnd = btl_bw * rt_prop * gain`) and
+  the core self-correcting property (a stalled path's rate ages out of the window and its
+  cwnd shrinks) without the full phase state machine. Revisit once phase 4's per-packet ACKs
+  land. See `core/cc/cc.go`'s package doc comment.
+- **`core/cc.Controller` only receives real samples on the client side.** It's fed from
+  `HandleProbeAck`'s existing PSN-delta bookkeeping (already used for loss, extended to also
+  track bytes sent since the last probe), and only the client runs the probe-driven state
+  machine at all (see this file's existing note on that asymmetry, above `core/bond/path.go`
+  in the repo). A relay-side path's `CWND()` therefore stays at `core/cc`'s generous initial
+  value rather than adapting — acceptable for now since it only under-constrains the relay's
+  own return-traffic scheduling, never the client's. Symmetric relay-initiated probing
+  (already flagged as future work) would close this gap.

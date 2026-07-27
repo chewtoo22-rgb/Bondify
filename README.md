@@ -4,10 +4,12 @@ Free, open-source, self-hostable WAN bonding. Packet-level bonding of unlimited 
 connections into one tunnel — what Speedify should have been, without the subscription,
 the account, the telemetry, or the vendor-controlled relay.
 
-**Status: Phase 2 complete and verified.** Real multipath: PATH_ADD, per-path probing and
-health tracking, round-robin scheduling, GSN-ordered reordering. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the full phase plan and [PROTOCOL.md](PROTOCOL.md)
-for the wire format. Do not use this yet as your only VPN — it is pre-alpha.
+**Status: Phase 3 complete and verified.** Real multipath: PATH_ADD, per-path probing and
+health tracking, GSN-ordered reordering, real per-path BBR-style congestion control, and
+the full scheduler ladder — round robin, weighted-goodput, minRTT+cwnd, and HoL-blocking-
+aware. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full phase plan and
+[PROTOCOL.md](PROTOCOL.md) for the wire format. Do not use this yet as your only VPN — it
+is pre-alpha.
 
 ## Read this before you expect anything from bonding
 
@@ -128,7 +130,7 @@ normal Linux dev box — see the `netem-gates` CI job. Until Phase 2's multipath
 lands, there's also no congestion control or retransmission on the single UDP path, so a
 saturating flow currently relies entirely on the tunnelled protocol's own recovery (e.g.
 TCP retransmits) rather than anything Bondify does — expected and by design for this phase;
-per-path BBR-style congestion control is Phase 3 scope (`core/cc/`, not yet implemented).
+per-path BBR-style congestion control (`core/cc/`) landed in Phase 3, see below.
 
 ## Verified so far (Phase 2)
 
@@ -166,12 +168,55 @@ bonding. `testbed/run_phase2.sh` is written to run the real capacity-constrained
 is wired into the `netem-gates` CI job, where GitHub Actions' real kernel will execute it
 for real.
 
+## Verified so far (Phase 3)
+
+Scheduler tiers 2-4 and real per-path congestion control (`core/cc`), unit-tested (44 new
+tests across `core/cc` and `core/sched`, all passing under `-race`) and run against real
+running relay+client binaries in the two-path netns rig:
+
+- Selecting `-scheduler hol-aware` on both binaries genuinely changes wire behavior: paths
+  established, 733 Mbps sustained over an 8-second `iperf3` run, and the live diagnostics
+  endpoint showed real, bounded, adaptive `cwnd` values (~21-25 KB) in place of Phase 2's
+  placeholder unbounded congestion window, with `hol-aware` visibly favoring the
+  lower-RTT/larger-cwnd path over the other.
+- `core/cc`'s windowed-max delivery-rate filter and `cwnd = btl_bw * rt_prop * gain`
+  formula are unit-tested directly: floors at a minimum window, caps at a maximum, survives
+  one bad sample without collapsing, and genuinely drains a sustained-zero-delivery path
+  out of its window (real numbers, not mocked -- see `core/cc/cc_test.go`).
+- Tier 4's adaptive `lambda` strictness is unit-tested end to end: a fresh scheduler
+  correctly skips a hugely mismatched slow path (15ms fast / 200ms slow, the HoL gate's own
+  numbers) rather than dumping onto it, and demonstrably relaxes that skip decision once
+  `lambda` has decayed from repeated slack-capacity decisions -- see
+  `TestHoLAwareLambdaDecayEnablesBorderlineSlowPath`.
+- `testbed/run_phase3.sh`'s harness mechanics (process orchestration, path-establishment
+  log parsing, `iperf3` JSON parsing, the three gate comparisons' arithmetic) were smoke-
+  tested end to end against real running binaries with shaping forced on regardless of tc
+  availability -- this caught and fixed a real bug (the script's `log()` helper wrote to
+  stdout, silently corrupting the `$(run_bonded ...)` throughput captures it shares that
+  stream with) before it ever reached CI.
+
+**Known gap, honestly stated:** like Phases 1 and 2, the HoL gate and the Tier 4 vs Tier 1
+hetero/homo benchmark matrix specifically require `tc netem` to hold two paths at genuinely
+different, asymmetric capacities (100Mbps/15ms fast vs 5Mbps/200ms/1%loss slow) -- without
+that split there is no real "slow path" for Tier 4's HoL-avoidance logic to have anything to
+decide about, and `testbed/run_phase3.sh` correctly detects this sandbox's lack of `tc
+netem` support and exits `0` with a warning rather than fabricate a pass. It's wired into
+the `netem-gates` CI job, where GitHub Actions' real kernel will execute the real
+capacity-constrained gate.
+
 Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link), real ACK
-packets and retransmission, and per-path congestion control are not yet implemented —
-retransmission is explicitly Phase 4 scope, congestion control Phase 3.
+packets and real ACK-driven retransmission are not yet implemented — that's Phase 4 scope
+(alongside REDUNDANT mode and adaptive FEC); per-path congestion control landed in Phase 3.
+
+## Scheduler tiers
+
+Pass `-scheduler <name>` to either binary to pick the tier (default `round-robin`):
+`round-robin` (Tier 1, the baseline), `weighted-goodput` (Tier 2), `min-rtt-cwnd` (Tier 3),
+`hol-aware` (Tier 4). See ARCHITECTURE.md §2.1 for what each one actually does and why
+Tier 3's "dumps onto the slow path once the fast path's window fills" behavior is a known,
+documented tradeoff that Tier 4 exists to fix.
 
 ## Phase plan
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) §5 for the full table with gates. Short version:
-Phases 0–2 are done and verified. Phase 3 (scheduler tiers 2-4: goodput-weighted, minRTT,
-HoL-blocking-aware) is next.
+Phases 0–3 are done and verified. Phase 4 (REDUNDANT mode + adaptive FEC) is next.
