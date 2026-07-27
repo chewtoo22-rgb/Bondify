@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux/amd64
+            goos: linux
+            goarch: amd64
+          - name: linux/arm64
+            goos: linux
+            goarch: arm64
+          - name: windows/amd64
+            goos: windows
+            goarch: amd64
+          - name: android/arm64
+            goos: android
+            goarch: arm64
+          - name: android/arm
+            goos: android
+            goarch: arm
+    name: build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: go vet (host arch only)
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: go vet ./...
+      - name: Build core (platform-agnostic package)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build ./core/...
+      - name: Build relay (linux/windows only)
+        if: matrix.goos == 'linux' || matrix.goos == 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build ./relay/...
+      - name: Build desktop CLI (linux/windows only)
+        if: matrix.goos == 'linux' || matrix.goos == 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: go build ./desktop/...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - run: go test ./... -race -count=1
+
+  netem-gates:
+    name: tc netem regression gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+      - name: Install netem tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 iptables
+      - name: Run mandatory regression gates
+        run: sudo -E env "PATH=$PATH" bash testbed/run.sh --ci
