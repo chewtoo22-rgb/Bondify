@@ -1,4 +1,4 @@
-# HYDRA
+# Bondify
 
 Free, open-source, self-hostable WAN bonding. Packet-level bonding of unlimited internet
 connections into one tunnel — what Speedify should have been, without the subscription,
@@ -24,9 +24,9 @@ Bonding is real, but it is not magic. These are physics, not marketing copy:
 - **Your relay's bandwidth is a hard ceiling, and its RTT is a latency floor.** A cheap VPS
   in the wrong country will make everything about your connection worse, not better.
 - **Links that differ wildly in speed or latency should be BACKUP, not BONDED.** A path
-  10x slower or higher-latency than the rest hurts more than it helps. HYDRA will tell you
+  10x slower or higher-latency than the rest hurts more than it helps. Bondify will tell you
   when it detects this; believe it.
-- **HYDRA looks like a VPN to the internet, because it is one.** Streaming services and
+- **Bondify looks like a VPN to the internet, because it is one.** Streaming services and
   banks may geoblock it. Split tunnelling with a curated default bypass list is provided
   and enabled by default for known-problematic destinations.
 - **REDUNDANT mode multiplies your data usage by the duplication factor.** On metered
@@ -51,7 +51,7 @@ Three components sharing one core:
 - **`android/`** — Kotlin + Compose `VpnService` shell around a `gomobile`-built AAR of
   `core/`. (Phase 5, not yet started.)
 - **`desktop/`** — Go. `wintun`/tray on Windows, TUN + CLI on Linux/macOS. The Linux CLI
-  (`desktop/cmd/hydra`) is what Phase 1 is built and verified against today.
+  (`desktop/cmd/bondify`) is what Phase 1 is built and verified against today.
 
 ## License
 
@@ -66,17 +66,17 @@ This gets you a working *single-path* encrypted tunnel — not bonding yet, that
 It's useful today mainly to prove the crypto/tunnel core works end to end.
 
 ```sh
-go build -o build/hydra-relay ./relay/cmd/hydra-relay
-go build -o build/hydra ./desktop/cmd/hydra
+go build -o build/bondify-relay ./relay/cmd/bondify-relay
+go build -o build/bondify ./desktop/cmd/bondify
 
 # On the relay host (needs a real internet-facing interface, e.g. eth0):
-sudo ./build/hydra-relay -listen :51820 -pool 10.77.0.0/24 -tun hydra0 \
-     -nat-iface eth0 -key-file /etc/hydra/relay.key
+sudo ./build/bondify-relay -listen :51820 -pool 10.77.0.0/24 -tun bondify0 \
+     -nat-iface eth0 -key-file /etc/bondify/relay.key
 # prints its public key on startup
 
 # On the client:
-sudo ./build/hydra -relay <relay-host>:51820 -relay-pubkey <printed-key> \
-     -tun hydra0 -default-route
+sudo ./build/bondify -relay <relay-host>:51820 -relay-pubkey <printed-key> \
+     -tun bondify0 -default-route
 ```
 
 `testbed/run.sh` stands up an isolated network-namespace rig (client ns + relay ns, relay
@@ -117,7 +117,7 @@ will run for real in CI (GitHub Actions' standard runners ship `sch_netem`) or o
 normal Linux dev box — see the `netem-gates` CI job. Until Phase 2's multipath scheduler
 lands, there's also no congestion control or retransmission on the single UDP path, so a
 saturating flow currently relies entirely on the tunnelled protocol's own recovery (e.g.
-TCP retransmits) rather than anything HYDRA does — expected and by design for this phase;
+TCP retransmits) rather than anything Bondify does — expected and by design for this phase;
 per-path BBR-style congestion control is Phase 3 scope (`core/cc/`, not yet implemented).
 
 ## Phase plan

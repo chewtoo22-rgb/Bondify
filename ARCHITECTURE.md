@@ -1,4 +1,4 @@
-# HYDRA — Architecture
+# Bondify — Architecture
 
 Condensed from the full engineering specification. This document covers domain theory,
 scheduler algorithms, and platform guidance. See `PROTOCOL.md` for the normative wire
@@ -18,7 +18,7 @@ into a single tunnel. No subscription, no account, no telemetry, no vendor-contr
 | 2 — Packet-level bonding | Split one flow across WANs, reassemble remotely | IP packet | **Yes** | **Yes** |
 | 3 — Transport-native multipath | MPTCP / MP-QUIC | Transport segment | Yes | Yes (aware peer) |
 
-HYDRA is Tier 2, with Tier 0/1 as degraded fallback (`Local mode`, §3.7).
+Bondify is Tier 2, with Tier 0/1 as degraded fallback (`Local mode`, §3.7).
 
 A TCP connection is a 4-tuple including source IP; packets from one connection can't split
 across source IPs without a reassembling remote endpoint. That endpoint — the relay — is
@@ -142,13 +142,13 @@ not reliable on Windows). Linux/macOS: `/dev/net/tun` / `utun`, policy routing
 ### 3.3 Relay
 
 Single static Go binary, no database, no cloud dependency. `install.sh` generates a
-keypair, writes `/etc/hydra/relay.conf`, installs a systemd unit, opens the firewall port,
+keypair, writes `/etc/bondify/relay.conf`, installs a systemd unit, opens the firewall port,
 prints client config as text and QR. Keyed by client static public key, not source IP.
 
 ## 4. Repository layout
 
 ```
-hydra/
+bondify/
 ├── ARCHITECTURE.md
 ├── PROTOCOL.md
 ├── core/                    # Go — bonding engine, platform agnostic
@@ -226,7 +226,7 @@ reporting, no account, no default relay logging; reproducible builds.
 - Bonding increases latency by roughly the relay round trip; it reduces variance, not latency.
 - Relay bandwidth is a hard ceiling; relay RTT is a latency floor.
 - Wildly mismatched links should be BACKUP, not BONDED.
-- HYDRA looks like a VPN to the internet, with all that implies (geoblocking risk); split
+- Bondify looks like a VPN to the internet, with all that implies (geoblocking risk); split
   tunnelling with a curated default bypass list ships enabled.
 - REDUNDANT mode multiplies data usage by the duplication factor.
 - You need a relay. That's physics, not a business model — the relay software is free.

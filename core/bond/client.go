@@ -35,7 +35,7 @@ type ClientHandshakeResult struct {
 // DialClient performs the Noise_IK handshake (HANDSHAKE_INIT/HANDSHAKE_RESP) over a fresh
 // UDP socket connected to the relay, and returns the resulting tunnel config plus a ready
 // ClientTunnel. It does not touch the TUN device's IP/routes — see core/tun's platform
-// helpers, invoked by the caller (cmd/hydra) using the returned Cfg, so this package stays
+// helpers, invoked by the caller (cmd/bondify) using the returned Cfg, so this package stays
 // free of OS-specific plumbing.
 func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) (*ClientTunnel, HandshakeRespPayload, error) {
 	raddr, err := net.ResolveUDPAddr("udp", cfg.RelayAddr)

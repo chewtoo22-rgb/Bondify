@@ -1,7 +1,7 @@
-// Command hydra is HYDRA's Linux CLI client. Phase 1 scope: single path, Noise_IK
+// Command bondify is Bondify's Linux CLI client. Phase 1 scope: single path, Noise_IK
 // handshake, TUN device, encrypted DATA in both directions. The desktop tray UI and
 // Windows wintun support land in phase 6; this binary is also the foundation for the
-// Linux path of that later work (see ARCHITECTURE.md §4 repo layout: desktop/cmd/hydra).
+// Linux path of that later work (see ARCHITECTURE.md §4 repo layout: desktop/cmd/bondify).
 package main
 
 import (
@@ -26,7 +26,7 @@ func main() {
 		relayAddr   = flag.String("relay", "", "relay address, host:port (required)")
 		relayPubKey = flag.String("relay-pubkey", "", "relay public key, base64 (required)")
 		keyFile     = flag.String("key-file", "", "path to client private key (generated if absent)")
-		tunName     = flag.String("tun", "hydra0", "TUN device name")
+		tunName     = flag.String("tun", "bondify0", "TUN device name")
 		mtu         = flag.Int("mtu", 1408, "expected tunnel MTU (overridden by relay's cfg_push once connected)")
 		defRoute    = flag.Bool("default-route", false, "replace the default route with one via the tunnel")
 		extraRoutes = flag.String("routes", "", "comma-separated extra CIDRs to route via the tunnel")
@@ -34,7 +34,7 @@ func main() {
 	flag.Parse()
 
 	if *relayAddr == "" || *relayPubKey == "" {
-		fmt.Fprintln(os.Stderr, "usage: hydra -relay host:port -relay-pubkey <base64> [-tun hydra0] [-default-route] [-routes cidr,cidr]")
+		fmt.Fprintln(os.Stderr, "usage: bondify -relay host:port -relay-pubkey <base64> [-tun bondify0] [-default-route] [-routes cidr,cidr]")
 		os.Exit(2)
 	}
 	relayPub, err := crypto.DecodeKey(*relayPubKey)

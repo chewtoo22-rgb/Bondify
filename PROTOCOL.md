@@ -1,7 +1,7 @@
-# BOND/1 — HYDRA Wire Protocol Specification
+# BOND/1 — Bondify Wire Protocol Specification
 
 **Version 1. Status: normative.** This document defines the wire format, session and path
-lifecycle, and control semantics for HYDRA's bonding transport. It is the contract every
+lifecycle, and control semantics for Bondify's bonding transport. It is the contract every
 other component depends on. Changes here are sequential and reviewed; no component may
 modify this format unilaterally.
 
@@ -111,7 +111,7 @@ Outer header: 16 bytes. Auth tag: 16 bytes. Fixed overhead before inner header: 
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
-Inner header: 19 bytes, padded to 20. **Total HYDRA overhead per data packet: 52 bytes.**
+Inner header: 19 bytes, padded to 20. **Total Bondify overhead per data packet: 52 bytes.**
 
 Therefore: `tunnel_MTU = min(path_PMTU across active paths) - 52`. For a typical 1500-byte path this yields 1448. For paths behind PPPoE (1492) it yields 1440. Always compute from the *minimum*, and recompute whenever a path joins.
 

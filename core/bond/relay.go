@@ -81,7 +81,7 @@ func (r *Relay) GatewayIP() net.IP { return r.pool.Gateway() }
 
 // Serve runs the UDP receive loop and the TUN receive loop until either errors. Intended
 // to be called from two goroutines by the caller, or wrapped; kept as two blocking methods
-// so cmd/hydra-relay controls lifecycle/shutdown explicitly.
+// so cmd/bondify-relay controls lifecycle/shutdown explicitly.
 func (r *Relay) ServeUDP() error {
 	buf := make([]byte, 65536)
 	for {

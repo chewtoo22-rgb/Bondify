@@ -1,6 +1,6 @@
 # Licensing
 
-HYDRA uses a split license, deliberately: the relay is copyleft to keep hosted forks
+Bondify uses a split license, deliberately: the relay is copyleft to keep hosted forks
 contributing back; the client core is permissive so it can be embedded anywhere (including
 proprietary router firmware) without friction, because the client is the thing that has to
 run on a stock, unrooted device and we want zero adoption barriers.

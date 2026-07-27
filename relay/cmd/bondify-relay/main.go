@@ -1,4 +1,4 @@
-// Command hydra-relay is the HYDRA relay: a single static binary, no database, no cloud
+// Command bondify-relay is the Bondify relay: a single static binary, no database, no cloud
 // dependency. Phase 1 scope: one UDP listener, Noise_IK handshake, one shared TUN device,
 // kernel IP forwarding + MASQUERADE for internet egress. See ARCHITECTURE.md §4.3 and
 // PROTOCOL.md §5 for the full design; multi-path, resource limits, and `status` land in
@@ -25,9 +25,9 @@ func main() {
 	var (
 		listen    = flag.String("listen", ":51820", "UDP listen address")
 		poolCIDR  = flag.String("pool", "10.77.0.0/24", "tunnel IP pool (relay owns the first address)")
-		tunName   = flag.String("tun", "hydra0", "TUN device name")
+		tunName   = flag.String("tun", "bondify0", "TUN device name")
 		mtu       = flag.Int("mtu", 1408, "tunnel MTU pushed to clients (payload MTU, not wire MTU)")
-		keyFile   = flag.String("key-file", "/etc/hydra/relay.key", "path to relay private key (generated if absent)")
+		keyFile   = flag.String("key-file", "/etc/bondify/relay.key", "path to relay private key (generated if absent)")
 		dnsList   = flag.String("dns", "1.1.1.1,9.9.9.9", "comma-separated DNS servers pushed to clients")
 		natIface  = flag.String("nat-iface", "", "if set, enable ip_forward + MASQUERADE(pool -> this interface) for internet egress")
 		keepalive = flag.Int("keepalive", 15, "NAT keepalive interval seconds, pushed to clients")

@@ -45,7 +45,7 @@ func DelRoute(cidr string) error {
 }
 
 // EgressDevice reports which interface the kernel's current routing table would use to
-// reach dst, before any HYDRA route is installed. Used to pin the client's uplink UDP
+// reach dst, before any Bondify route is installed. Used to pin the client's uplink UDP
 // socket path (via AddHostRoute) to the real physical interface, so that once a
 // tunnel-wide default route is added, the relay-bound UDP traffic itself does not get
 // routed back into the tunnel it's carrying — the routing-loop bug described in
