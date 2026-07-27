@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -88,19 +89,20 @@ func main() {
 		log.Fatalf("relay: init: %v", err)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	errCh := make(chan error, 2)
 	go func() { errCh <- r.ServeUDP() }()
 	go func() { errCh <- r.ServeTUN() }()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go r.ServeReorder(ctx)
 
 	log.Printf("relay: listening on %s (protocol BOND/%d)", *listen, proto.Version)
 	select {
 	case err := <-errCh:
 		log.Fatalf("relay: fatal: %v", err)
-	case sig := <-sigCh:
-		log.Printf("relay: received %s, shutting down", sig)
+	case <-ctx.Done():
+		log.Printf("relay: shutting down")
 	}
 }
 

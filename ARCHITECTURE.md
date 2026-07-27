@@ -243,3 +243,31 @@ reporting, no account, no default relay logging; reproducible builds.
   12-byte nonce, making the true clear-text prefix 20 bytes (8 fixed + 12 nonce), and
   `HeaderOverhead = 20 + 20 (inner) + 16 (tag) = 56`. `core/pmtu` computes tunnel MTU from
   this corrected constant. See `core/proto/proto.go` for the full reasoning.
+- **PROBE/PROBE_ACK/PATH_ADD/PATH_DROP/CTRL skip the inner DATA header.** That header
+  carries GSN (data-stream reassembly order) and PSN/Generation (loss attribution, FEC) for
+  the tunnelled IP stream specifically. Control packets need neither: every packet type
+  already gets replay protection for free from `crypto.Session`'s per-path AEAD nonce
+  counter and replay window (independent of GSN, built and unit-tested in phase 1). Reusing
+  the DATA-shaped header for control messages would conflate two genuinely different
+  counters. See `core/bond/control.go`.
+- **Multi-path egress on Linux uses `SO_BINDTODEVICE`, not just source-IP binding.**
+  ARCHITECTURE.md §3.2 already notes source-IP binding alone is unreliable for this on
+  Windows; the same problem exists on Linux the moment two paths need to reach the *same*
+  destination address (the relay's one IP) — plain destination-based routing picks one
+  interface for that destination regardless of which local address a socket bound to.
+  `core/tun/linux.go`'s `DialUDPViaDevice` pins each path's socket to its physical interface
+  via `SO_BINDTODEVICE`, overriding route selection outright; policy routing (`ip rule` +
+  per-uplink tables, also spec-endorsed) is the alternative used by the phase 2 test rig
+  itself (`testbed/topo/two_path.sh`) since it doesn't require elevated per-socket syscalls.
+  Both are legitimate; a real client should offer device pinning as a fallback for uplinks
+  the OS hasn't been configured with proper policy routing for.
+- **Fixed a livelock in path DEGRADED→ACTIVE recovery, found under real load-testing.**
+  Loss was computed only from DATA-packet PSN deltas; once a path degraded and the
+  scheduler (correctly) stopped routing DATA onto it, there was no more DATA to measure
+  loss from, so the loss estimate froze at its last value and never dropped back below the
+  undegrade threshold — the path, and if every path hit this simultaneously the whole
+  tunnel, could get stuck forever even after the underlying condition cleared. Fixed by
+  feeding an `instLoss=0` sample into the EWMA whenever a `PROBE_ACK` completes with zero
+  new DATA sent, since a completed probe round trip is itself evidence the path currently
+  works. See `core/bond/path.go`'s `HandleProbeAck` and README.md's Phase 2 section for how
+  this was actually reproduced (not just reasoned about) before the fix.

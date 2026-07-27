@@ -103,5 +103,7 @@ jobs:
           cache: true
       - name: Install netem tooling
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 iptables tcpdump iperf3 curl
-      - name: Run mandatory regression gates
+      - name: Run phase 1 gates (single path)
         run: sudo -E env "PATH=$PATH" bash testbed/run.sh --ci
+      - name: Run phase 2 gate (two-path aggregation, >80Mbps on 2x50mbit/20ms)
+        run: sudo -E env "PATH=$PATH" bash testbed/run_phase2.sh

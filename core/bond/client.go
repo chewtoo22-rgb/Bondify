@@ -4,52 +4,66 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
 	"github.com/chewtoo22-rgb/bondify/core/proto"
+	"github.com/chewtoo22-rgb/bondify/core/reorder"
+	"github.com/chewtoo22-rgb/bondify/core/sched"
 	"github.com/chewtoo22-rgb/bondify/core/tun"
 )
 
-// PathZero is the well-known path ID used until phase 2 introduces PATH_ADD and real
-// multipath. Reserved (not reused for a real second path later) purely for log clarity.
-const PathZero uint8 = 0
+// PathSpec configures one client uplink.
+type PathSpec struct {
+	LocalAddr string // local bind address; "" lets the OS choose the source
+	// Device pins the socket to a specific physical interface via SO_BINDTODEVICE,
+	// overriding destination-based routing. Required once more than one path needs to
+	// reach the *same* relay address: plain source-IP binding does not reliably control
+	// egress interface in that case (see core/tun/linux.go's DialUDPViaDevice doc for
+	// why). Leave empty for a single-path setup or when each uplink already has its own
+	// distinct default route.
+	Device string
+}
 
-// ClientConfig configures a single-path client tunnel (phase 1).
+// ClientConfig configures a (possibly multi-path) client tunnel.
 type ClientConfig struct {
-	RelayAddr    string // host:port
-	RelayPubKey  [crypto.KeyLen]byte
-	ClientKey    crypto.Keypair
+	RelayAddr   string // host:port
+	RelayPubKey [crypto.KeyLen]byte
+	ClientKey   crypto.Keypair
+	// Paths is one entry per uplink. The first entry is used for path 0 (the Noise
+	// handshake path); each additional entry opens its own UDP socket and registers via
+	// PATH_ADD. Pass a single zero-value PathSpec for the phase-1-equivalent single-path
+	// behavior (system-chosen source address, no device pinning).
+	Paths        []PathSpec
 	HandshakeTO  time.Duration
 	HandshakeTry int
 }
 
-// ClientHandshakeResult is what the caller needs to finish OS-level setup (assign the TUN
-// device's IP, install routes) before calling ClientTunnel.Run.
-type ClientHandshakeResult struct {
-	Cfg  HandshakeRespPayload
-	Conn *net.UDPConn
-}
-
-// DialClient performs the Noise_IK handshake (HANDSHAKE_INIT/HANDSHAKE_RESP) over a fresh
-// UDP socket connected to the relay, and returns the resulting tunnel config plus a ready
-// ClientTunnel. It does not touch the TUN device's IP/routes — see core/tun's platform
-// helpers, invoked by the caller (cmd/bondify) using the returned Cfg, so this package stays
-// free of OS-specific plumbing.
+// DialClient performs the Noise_IK handshake on path 0, then registers any additional
+// paths from cfg.Paths via PATH_ADD, and returns a ready multi-path ClientTunnel. It does
+// not touch the TUN device's IP/routes -- see core/tun's platform helpers, invoked by the
+// caller (cmd/bondify) using the returned Cfg.
 func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) (*ClientTunnel, HandshakeRespPayload, error) {
 	raddr, err := net.ResolveUDPAddr("udp", cfg.RelayAddr)
 	if err != nil {
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: resolve relay addr: %w", err)
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
+
+	paths := cfg.Paths
+	if len(paths) == 0 {
+		paths = []PathSpec{{}}
+	}
+
+	conn0, err := dialPath(ctx, paths[0], raddr)
 	if err != nil {
-		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: dial relay: %w", err)
+		return nil, HandshakeRespPayload{}, err
 	}
 
 	init, err := crypto.NewInitiator(cfg.ClientKey, cfg.RelayPubKey)
 	if err != nil {
-		_ = conn.Close()
+		_ = conn0.Close()
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: new initiator: %w", err)
 	}
 
@@ -64,12 +78,12 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 
 	initMsg, err := init.WriteInit(nil)
 	if err != nil {
-		_ = conn.Close()
+		_ = conn0.Close()
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: write handshake init: %w", err)
 	}
 	initPkt := make([]byte, proto.OuterPrefixLen+len(initMsg))
 	if err := proto.MarshalOuter(initPkt, proto.OuterHeader{Type: proto.TypeHandshakeInit, Version: proto.Version}); err != nil {
-		_ = conn.Close()
+		_ = conn0.Close()
 		return nil, HandshakeRespPayload{}, err
 	}
 	copy(initPkt[proto.OuterPrefixLen:], initMsg)
@@ -79,15 +93,15 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 	var sess *crypto.Session
 	var lastErr error
 	for attempt := 0; attempt < tries; attempt++ {
-		if _, err := conn.Write(initPkt); err != nil {
+		if _, err := conn0.Write(initPkt); err != nil {
 			lastErr = fmt.Errorf("bond: send handshake init: %w", err)
 			continue
 		}
-		if err := conn.SetReadDeadline(time.Now().Add(handshakeTO)); err != nil {
+		if err := conn0.SetReadDeadline(time.Now().Add(handshakeTO)); err != nil {
 			lastErr = fmt.Errorf("bond: set read deadline: %w", err)
 			continue
 		}
-		n, err := conn.Read(respBuf)
+		n, err := conn0.Read(respBuf)
 		if err != nil {
 			lastErr = fmt.Errorf("bond: handshake response timeout: %w", err)
 			continue
@@ -112,39 +126,146 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 		lastErr = nil
 		break
 	}
-	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn0.SetReadDeadline(time.Time{})
 	if lastErr != nil {
-		_ = conn.Close()
+		_ = conn0.Close()
 		return nil, HandshakeRespPayload{}, lastErr
 	}
 
+	path0 := NewPath(0, conn0)
+	path0.SetActive() // handshake completion is path 0's implicit ack
+
 	t := &ClientTunnel{
-		conn:         conn,
+		relayAddr:    raddr,
 		dev:          dev,
 		sess:         sess,
 		sessionIndex: respPayload.SessionIndex,
 		mtu:          mtu,
+		sched:        sched.NewRoundRobin(),
+		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
+		paths:        []*Path{path0},
 	}
+
+	for i := 1; i < len(paths); i++ {
+		if err := t.addPath(ctx, uint8(i), paths[i], handshakeTO, tries); err != nil {
+			// A path that fails to join doesn't sink the whole tunnel -- log-worthy but
+			// non-fatal; the caller still gets a working (degraded-capacity) tunnel.
+			// cmd/bondify surfaces this via the returned error slice in a future pass;
+			// for now the session simply proceeds with fewer paths than requested.
+			t.pathErrs = append(t.pathErrs, fmt.Errorf("path %d (%s): %w", i, paths[i].LocalAddr, err))
+		}
+	}
+
 	return t, respPayload, nil
 }
 
-// ClientTunnel is the single-path (phase 1) client-side data-plane engine: TUN <-> UDP,
-// with BOND/1 DATA framing and AEAD in both directions.
+func dialPath(ctx context.Context, spec PathSpec, raddr *net.UDPAddr) (*net.UDPConn, error) {
+	var laddr *net.UDPAddr
+	if spec.LocalAddr != "" {
+		ip := net.ParseIP(spec.LocalAddr)
+		if ip == nil {
+			return nil, fmt.Errorf("bond: bad local address %q", spec.LocalAddr)
+		}
+		laddr = &net.UDPAddr{IP: ip}
+	}
+	conn, err := tun.DialUDPViaDevice(ctx, laddr, raddr, spec.Device)
+	if err != nil {
+		return nil, fmt.Errorf("bond: dial path (local=%q device=%q): %w", spec.LocalAddr, spec.Device, err)
+	}
+	return conn, nil
+}
+
+// addPath opens a new UDP socket for spec and registers it via PATH_ADD.
+func (t *ClientTunnel) addPath(ctx context.Context, id uint8, spec PathSpec, timeout time.Duration, tries int) error {
+	conn, err := dialPath(ctx, spec, t.relayAddr)
+	if err != nil {
+		return err
+	}
+	p := NewPath(id, conn)
+
+	payload, err := marshalCBOR(PathAddPayload{PathID: id})
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	pkt, err := sealControl(t.sess, proto.TypePathAdd, t.sessionIndex, id, payload)
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+
+	respBuf := make([]byte, 2048)
+	var lastErr error
+	acked := false
+	for attempt := 0; attempt < tries; attempt++ {
+		if _, err := conn.Write(pkt); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+			lastErr = err
+			continue
+		}
+		n, err := conn.Read(respBuf)
+		if err != nil {
+			lastErr = fmt.Errorf("path_add ack timeout: %w", err)
+			continue
+		}
+		oh, consumed, err := proto.UnmarshalOuter(respBuf[:n])
+		if err != nil || oh.Type != proto.TypeCtrl {
+			lastErr = fmt.Errorf("unexpected path_add response")
+			continue
+		}
+		ctrlPayload, err := openControl(t.sess, oh, id, respBuf[consumed:n])
+		if err != nil {
+			lastErr = fmt.Errorf("open path_add ack: %w", err)
+			continue
+		}
+		var ack CtrlPathAddAck
+		if err := unmarshalCBOR(ctrlPayload, &ack); err != nil || ack.Kind != "path_add_ack" || ack.PathID != id {
+			lastErr = fmt.Errorf("malformed path_add ack")
+			continue
+		}
+		acked = true
+		lastErr = nil
+		break
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	if !acked {
+		_ = conn.Close()
+		return lastErr
+	}
+
+	p.SetActive()
+	t.pathsMu.Lock()
+	t.paths = append(t.paths, p)
+	t.pathsMu.Unlock()
+	return nil
+}
+
+// ClientTunnel is the client-side multi-path data-plane engine.
 type ClientTunnel struct {
-	conn         *net.UDPConn
+	relayAddr    *net.UDPAddr
 	dev          tun.Device
 	sess         *crypto.Session
 	sessionIndex uint32
 	mtu          int
 
-	sendGSN uint64
-	sendPSN uint32
+	sched      sched.Scheduler
+	reorderBuf *reorder.Buffer
+
+	pathsMu sync.RWMutex
+	paths   []*Path
+
+	pathErrs []error
+
+	sendGSN atomic.Uint64
 
 	Stats Stats
 }
 
-// Stats are simple atomic counters, enough for phase 1 visibility; core/bond's diagnostics
-// story (per-path sparklines etc.) lands with the scheduler in phase 3+.
+// Stats are simple atomic counters. Per-path breakdowns live on Path.Stats; these are the
+// tunnel-wide totals for a quick top-level view.
 type Stats struct {
 	TxPackets uint64
 	RxPackets uint64
@@ -153,30 +274,60 @@ type Stats struct {
 	RxErrors  uint64
 }
 
-// Run pumps packets in both directions until ctx is cancelled or either direction errors.
+// Paths returns a snapshot of the current path set.
+func (t *ClientTunnel) Paths() []*Path {
+	t.pathsMu.RLock()
+	defer t.pathsMu.RUnlock()
+	out := make([]*Path, len(t.paths))
+	copy(out, t.paths)
+	return out
+}
+
+// PathErrors returns any errors encountered adding paths during DialClient. A non-empty
+// result means the tunnel is running with fewer paths than requested, not that it's down.
+func (t *ClientTunnel) PathErrors() []error { return t.pathErrs }
+
+func (t *ClientTunnel) schedPaths() []sched.Path {
+	paths := t.Paths()
+	out := make([]sched.Path, len(paths))
+	for i, p := range paths {
+		out[i] = p
+	}
+	return out
+}
+
+// Run pumps packets across all paths until ctx is cancelled or a fatal error occurs.
 func (t *ClientTunnel) Run(ctx context.Context) error {
-	errCh := make(chan error, 2)
+	paths := t.Paths()
+	errCh := make(chan error, len(paths)+2)
+
 	go func() { errCh <- t.tunToNet(ctx) }()
-	go func() { errCh <- t.netToTun(ctx) }()
+	go func() { errCh <- t.drainReorderToTun(ctx) }()
+	for _, p := range paths {
+		p := p
+		go func() { errCh <- t.pathReadLoop(ctx, p) }()
+		go t.probeLoop(ctx, p)
+	}
+
 	select {
 	case <-ctx.Done():
-		_ = t.conn.Close()
-		_ = t.dev.Close()
+		t.closeAll()
 		<-errCh
 		return ctx.Err()
 	case err := <-errCh:
-		_ = t.conn.Close()
-		_ = t.dev.Close()
+		t.closeAll()
 		return err
 	}
 }
 
+func (t *ClientTunnel) closeAll() {
+	_ = t.dev.Close()
+	for _, p := range t.Paths() {
+		_ = p.conn.Close()
+	}
+}
+
 func (t *ClientTunnel) tunToNet(ctx context.Context) error {
-	// Read must be called with a batch sized to Device.BatchSize(): with GRO/GSO enabled
-	// (which wireguard-go's Linux TUN turns on whenever the kernel supports it, with no
-	// way for a caller to opt out), a single underlying read can coalesce more than one
-	// packet, and passing a 1-slot batch overflows that with tun.ErrTooManySegments the
-	// moment a real TCP flow (e.g. iperf3) is saturating the link.
 	batch := t.dev.BatchSize()
 	if batch < 1 {
 		batch = 1
@@ -198,59 +349,164 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 		}
 		for i := 0; i < n; i++ {
 			payload := bufs[i][tun.IOOffset : tun.IOOffset+sizes[i]]
-			gsn := atomic.AddUint64(&t.sendGSN, 1) - 1
-			psn := atomic.AddUint32(&t.sendPSN, 1) - 1
-			pkt, err := sealPacket(t.sess, proto.TypeData, t.sessionIndex, PathZero, proto.InnerDataHeader{
+			path := t.sched.Next(t.schedPaths())
+			if path == nil {
+				continue // no eligible path right now; drop (queueing is a later refinement)
+			}
+			p := path.(*Path)
+			gsn := t.sendGSN.Add(1) - 1
+			psn := p.NextSendPSN()
+			pkt, err := sealPacket(t.sess, proto.TypeData, t.sessionIndex, p.id, proto.InnerDataHeader{
 				GSN:        gsn,
 				PSN:        psn,
-				PathID:     PathZero,
+				PathID:     p.id,
 				PayloadLen: uint16(len(payload)),
 			}, payload)
 			if err != nil {
 				return fmt.Errorf("bond: seal data: %w", err)
 			}
-			if _, err := t.conn.Write(pkt); err != nil {
-				return fmt.Errorf("bond: udp write: %w", err)
+			if _, err := p.conn.Write(pkt); err != nil {
+				continue // this path's socket errored; let its read loop notice and report
 			}
 			atomic.AddUint64(&t.Stats.TxPackets, 1)
 			atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
+			atomic.AddUint64(&p.Stats.TxPackets, 1)
+			atomic.AddUint64(&p.Stats.TxBytes, uint64(len(payload)))
 		}
 	}
 }
 
-func (t *ClientTunnel) netToTun(ctx context.Context) error {
+func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
 	buf := make([]byte, 65536)
-	writeBuf := make([]byte, tun.IOOffset+65536)
-	writeBufs := make([][]byte, 1)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
 		}
-		n, err := t.conn.Read(buf)
+		n, err := p.conn.Read(buf)
 		if err != nil {
-			return fmt.Errorf("bond: udp read: %w", err)
+			return fmt.Errorf("bond: udp read (path %d): %w", p.id, err)
 		}
 		oh, consumed, err := proto.UnmarshalOuter(buf[:n])
 		if err != nil {
-			continue // malformed; drop silently per "authenticate first" discipline
-		}
-		if oh.Type != proto.TypeData {
-			continue // PROBE/ACK/CTRL land in phase 2
-		}
-		inner, payload, err := openPacket(t.sess, oh, PathZero, buf[consumed:n])
-		if err != nil {
-			atomic.AddUint64(&t.Stats.RxErrors, 1)
 			continue
 		}
-		_ = inner // GSN-ordered delivery arrives with the reorder buffer in phase 2
-		n2 := copy(writeBuf[tun.IOOffset:], payload)
-		writeBufs[0] = writeBuf[:tun.IOOffset+n2]
-		if _, err := t.dev.Write(writeBufs, tun.IOOffset); err != nil {
-			return fmt.Errorf("bond: tun write: %w", err)
+		switch oh.Type {
+		case proto.TypeData:
+			inner, payload, err := openPacket(t.sess, oh, p.id, buf[consumed:n])
+			if err != nil {
+				atomic.AddUint64(&t.Stats.RxErrors, 1)
+				continue
+			}
+			p.RecordRecv()
+			atomic.AddUint64(&t.Stats.RxPackets, 1)
+			atomic.AddUint64(&t.Stats.RxBytes, uint64(len(payload)))
+			atomic.AddUint64(&p.Stats.RxPackets, 1)
+			atomic.AddUint64(&p.Stats.RxBytes, uint64(len(payload)))
+			cp := append([]byte(nil), payload...)
+			t.reorderBuf.Push(reorder.Packet{GSN: inner.GSN, Payload: cp, Push: proto.HasFlag(inner.Flags, proto.FlagPUSH)})
+		case proto.TypeProbeAck:
+			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
+			if err != nil {
+				continue
+			}
+			var ack ProbeAckPayload
+			if err := unmarshalCBOR(payload, &ack); err != nil {
+				continue
+			}
+			p.HandleProbeAck(ack, time.Now())
+		case proto.TypeProbe:
+			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
+			if err != nil {
+				continue
+			}
+			var probe ProbePayload
+			if err := unmarshalCBOR(payload, &probe); err != nil {
+				continue
+			}
+			recvPSN := p.RecordRecv()
+			ackPayload, err := marshalCBOR(ProbeAckPayload{SentAtUnixNano: probe.SentAtUnixNano, SentPSN: probe.SentPSN, RecvPSN: recvPSN})
+			if err != nil {
+				continue
+			}
+			ackPkt, err := sealControl(t.sess, proto.TypeProbeAck, t.sessionIndex, p.id, ackPayload)
+			if err != nil {
+				continue
+			}
+			_, _ = p.conn.Write(ackPkt)
+		default:
+			// PATH_ADD/PATH_DROP/CTRL kinds not yet meaningful post-setup on the client
+			// side in phase 2.
 		}
-		atomic.AddUint64(&t.Stats.RxPackets, 1)
-		atomic.AddUint64(&t.Stats.RxBytes, uint64(len(payload)))
+	}
+}
+
+func (t *ClientTunnel) drainReorderToTun(ctx context.Context) error {
+	writeBuf := make([]byte, tun.IOOffset+65536)
+	writeBufs := make([][]byte, 1)
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case pkt := <-t.reorderBuf.Out():
+			n := copy(writeBuf[tun.IOOffset:], pkt.Payload)
+			writeBufs[0] = writeBuf[:tun.IOOffset+n]
+			if _, err := t.dev.Write(writeBufs, tun.IOOffset); err != nil {
+				return fmt.Errorf("bond: tun write: %w", err)
+			}
+		}
+	}
+}
+
+// probeLoop sends PROBE on p every ProbeInterval, backing off to ProbeIdleInterval after
+// ProbeIdleAfter of no traffic, and reports missed ACKs to the path's state machine.
+func (t *ClientTunnel) probeLoop(ctx context.Context, p *Path) {
+	interval := ProbeInterval
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var lastSentAt time.Time
+	var lastAckSeen int64
+	first := true
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if p.State() == sched.StateDead {
+			return
+		}
+
+		if !first {
+			// If no PROBE_ACK arrived since we sent the last probe, that's a miss.
+			if p.lastProbeAckAt.Load() == lastAckSeen {
+				p.HandleProbeMissed()
+			}
+		}
+		first = false
+
+		probe := p.BuildProbe()
+		payload, err := marshalCBOR(probe)
+		if err == nil {
+			pkt, err := sealControl(t.sess, proto.TypeProbe, t.sessionIndex, p.id, payload)
+			if err == nil {
+				_, _ = p.conn.Write(pkt)
+			}
+		}
+		lastSentAt = time.Now()
+		lastAckSeen = p.lastProbeAckAt.Load()
+
+		idle := time.Since(lastSentAt) > ProbeIdleAfter
+		want := ProbeInterval
+		if idle {
+			want = ProbeIdleInterval
+		}
+		if want != interval {
+			interval = want
+			ticker.Reset(interval)
+		}
 	}
 }

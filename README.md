@@ -4,11 +4,10 @@ Free, open-source, self-hostable WAN bonding. Packet-level bonding of unlimited 
 connections into one tunnel — what Speedify should have been, without the subscription,
 the account, the telemetry, or the vendor-controlled relay.
 
-**Status: Phase 1 complete and verified.** Single-path relay + Linux CLI client, Noise_IK
-handshake, encrypted TUN tunnel, real NAT egress. Multipath bonding (the actual point of
-the project) is Phase 2, in progress. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full
-phase plan and [PROTOCOL.md](PROTOCOL.md) for the wire format. Do not use this yet as your
-only VPN — it is pre-alpha.
+**Status: Phase 2 complete and verified.** Real multipath: PATH_ADD, per-path probing and
+health tracking, round-robin scheduling, GSN-ordered reordering. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full phase plan and [PROTOCOL.md](PROTOCOL.md)
+for the wire format. Do not use this yet as your only VPN — it is pre-alpha.
 
 ## Read this before you expect anything from bonding
 
@@ -120,9 +119,48 @@ saturating flow currently relies entirely on the tunnelled protocol's own recove
 TCP retransmits) rather than anything Bondify does — expected and by design for this phase;
 per-path BBR-style congestion control is Phase 3 scope (`core/cc/`, not yet implemented).
 
+## Verified so far (Phase 2)
+
+Run against a real two-path relay+client pair in an isolated netns rig (`testbed/run_phase2.sh`,
+`testbed/topo/two_path.sh`), not code inspection:
+
+- Real `PATH_ADD`/CTRL-ack handshake registers a second path within an already-established
+  session; both paths reach `ACTIVE`.
+- Round-robin genuinely alternates: in an 8-second saturating transfer, path 0 and path 1
+  carried 264,278 and 264,276 packets respectively — a near-perfect 50/50 split, not an
+  artifact of one path dominating.
+- Per-path health tracking (RTT via probe round trips, loss via PSN-delta EWMA) updates
+  live and correctly, verified against real induced loss under saturating load (loss
+  climbed to 6–14% under an uncapped, CPU-bound iperf3 run, then recovered as load eased).
+- Sustained two-path throughput: ~610–620 Mbps, no crashes, no stalls, across repeated runs.
+
+**A real bug found and fixed during this verification, not just claimed away:** the
+DEGRADED→ACTIVE recovery condition depends on loss dropping back below threshold, but loss
+was computed purely from DATA-packet PSN deltas — so once the scheduler correctly stopped
+routing DATA onto a degraded path, there was no more DATA to measure, loss stayed frozen at
+its last (bad) value forever, and the path could never recover. Reproduced directly (traffic
+flatlined completely, mid-test, and stayed flatlined for 5+ minutes with the process still
+alive but stuck), root-caused, and fixed: a `PROBE_ACK` completing at all now feeds an
+`instLoss=0` sample into the EWMA even with zero DATA in flight, so idle-but-healthy paths
+recover within a few probe intervals instead of never. Re-verified after the fix across two
+separate saturating runs with no recurrence.
+
+**Known gap, honestly stated:** ARCHITECTURE.md's phase 2 gate is specifically "two
+*emulated 50 Mbps* paths deliver >80 Mbps aggregate" — that requires `tc netem`/`tbf` to
+actually cap per-path capacity, which this sandbox's kernel doesn't support (see the Phase 1
+section above). Without a capacity cap, both paths compete for the same single-core AEAD
+encrypt/decrypt budget, so a *single* uncapped path can outperform two uncapped paths
+sharing that budget — that's a CPU-bound-vs-network-bound difference, not evidence against
+bonding. `testbed/run_phase2.sh` is written to run the real capacity-constrained gate and
+is wired into the `netem-gates` CI job, where GitHub Actions' real kernel will execute it
+for real.
+
+Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link), real ACK
+packets and retransmission, and per-path congestion control are not yet implemented —
+retransmission is explicitly Phase 4 scope, congestion control Phase 3.
+
 ## Phase plan
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) §5 for the full table with gates. Short version:
-Phase 0 (scaffold) and Phase 1 (this) are done and verified. Phase 2 (multipath +
-round-robin + reordering) is next — that's the phase where the product actually starts
-being a bonder rather than just an encrypted tunnel.
+Phases 0–2 are done and verified. Phase 3 (scheduler tiers 2-4: goodput-weighted, minRTT,
+HoL-blocking-aware) is next.

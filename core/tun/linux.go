@@ -4,10 +4,14 @@ package tun
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"os/exec"
 	"strings"
+	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // ConfigureLinux brings a TUN interface up with the given local address (CIDR form, e.g.
@@ -65,6 +69,48 @@ func EgressDevice(dst net.IP) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("tun: could not parse egress device from: %s", out)
+}
+
+// DialUDPViaDevice dials a UDP socket bound to laddr (may be nil) and, if device is
+// non-empty, pinned to that specific network interface via SO_BINDTODEVICE regardless of
+// what the destination-based routing table would otherwise choose.
+//
+// This is required, not cosmetic, for multipath: ARCHITECTURE.md §3.1 notes that on Linux,
+// "source-IP binding alone does not reliably control egress interface" once two uplinks
+// need to reach the *same* destination (the relay's one address) — plain destination-based
+// routing picks one interface for that destination regardless of which local address a
+// socket bound to, so a second uplink's packets would silently egress the first uplink's
+// interface with a source address that doesn't belong to it, and upstream reverse-path
+// filtering commonly drops exactly that traffic. Binding the device (equivalent in effect
+// to the policy-routing/fwmark approach the same section also describes, but requiring no
+// extra routing table setup) makes each path's socket use its own physical interface
+// unconditionally. Requires CAP_NET_RAW.
+func DialUDPViaDevice(ctx context.Context, laddr *net.UDPAddr, raddr *net.UDPAddr, device string) (*net.UDPConn, error) {
+	d := net.Dialer{}
+	if laddr != nil {
+		d.LocalAddr = laddr
+	}
+	if device != "" {
+		d.Control = func(_, _ string, c syscall.RawConn) error {
+			var opErr error
+			if err := c.Control(func(fd uintptr) {
+				opErr = unix.BindToDevice(int(fd), device)
+			}); err != nil {
+				return err
+			}
+			return opErr
+		}
+	}
+	conn, err := d.DialContext(ctx, "udp", raddr.String())
+	if err != nil {
+		return nil, fmt.Errorf("tun: dial udp via device %q: %w", device, err)
+	}
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		_ = conn.Close()
+		return nil, fmt.Errorf("tun: dial udp: unexpected conn type %T", conn)
+	}
+	return udpConn, nil
 }
 
 func run(name string, args ...string) error {
