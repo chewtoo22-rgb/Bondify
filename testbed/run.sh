@@ -70,29 +70,48 @@ else
 	cat /tmp/hydra-testbed-ping.log
 fi
 
-log "gate: HTTP through tunnel to a real internet host"
-TARGET_IP=$(ip netns exec hydra-relay getent ahostsv4 info.cern.ch | awk '{print $1; exit}')
-if [ -n "$TARGET_IP" ] && ip netns exec hydra-client curl -sS -m 10 -o /dev/null -w "%{http_code}" \
-	-H "Host: info.cern.ch" "http://$TARGET_IP/" | grep -q "200"; then
-	log "PASS: HTTP 200 through tunnel to $TARGET_IP"
-else
-	fail "HTTP request through tunnel did not return 200"
-fi
+# A local HTTP target in the root namespace, reachable from the client only via
+# tunnel -> relay decrypt -> relay's kernel routing/NAT -> root ns. Deliberately not a
+# real internet hostname: depending on live DNS/third-party uptime makes this gate flaky
+# on CI runners with their own network quirks, and a local target still exercises the
+# entire real path (encryption, decryption, forwarding, NAT) end to end -- it just
+# doesn't also depend on info.cern.ch being reachable from wherever CI happens to run.
+HTTP_TARGET_PORT=18080
+if command -v python3 >/dev/null; then
+	# 10.50.0.1 is the root namespace's address on v-rel-out-h (see topo/single_path.sh);
+	# the server must run in the root ns, not hydra-relay ns, to bind it.
+	python3 -m http.server "$HTTP_TARGET_PORT" --bind 10.50.0.1 \
+		>/tmp/hydra-testbed-httpd.log 2>&1 &
+	HTTPD_PID=$!
+	sleep 1
 
-log "gate: wire encryption (tcpdump on the client<->relay path must show no plaintext)"
-if command -v tcpdump >/dev/null; then
-	ip netns exec hydra-relay timeout 4 tcpdump -i v-rel-wan -w /tmp/hydra-testbed-wire.pcap -U >/tmp/hydra-testbed-tcpdump.log 2>&1 &
-	TCPDUMP_PID=$!
-	sleep 0.5
-	ip netns exec hydra-client curl -sS -m 5 -o /dev/null -H "Host: info.cern.ch" "http://$TARGET_IP/" || true
-	wait "$TCPDUMP_PID" 2>/dev/null || true
-	if strings -a /tmp/hydra-testbed-wire.pcap 2>/dev/null | grep -qiE "GET / HTTP|Host: info\.cern|HTTP/1\.[01] 200"; then
-		fail "plaintext HTTP strings found on the wire -- encryption is broken"
+	log "gate: HTTP through tunnel to a real (locally-hosted) target via relay's NAT path"
+	if ip netns exec hydra-client curl -sS -m 10 -o /dev/null -w "%{http_code}" \
+		"http://10.50.0.1:${HTTP_TARGET_PORT}/" | grep -q "200"; then
+		log "PASS: HTTP 200 through tunnel"
 	else
-		log "PASS: no plaintext found in $(wc -c </tmp/hydra-testbed-wire.pcap 2>/dev/null || echo 0) bytes of captured wire traffic"
+		fail "HTTP request through tunnel did not return 200"
 	fi
+
+	log "gate: wire encryption (tcpdump on the client<->relay path must show no plaintext)"
+	if command -v tcpdump >/dev/null; then
+		ip netns exec hydra-relay timeout 4 tcpdump -i v-rel-wan -w /tmp/hydra-testbed-wire.pcap -U >/tmp/hydra-testbed-tcpdump.log 2>&1 &
+		TCPDUMP_PID=$!
+		sleep 0.5
+		ip netns exec hydra-client curl -sS -m 5 -o /dev/null "http://10.50.0.1:${HTTP_TARGET_PORT}/" || true
+		wait "$TCPDUMP_PID" 2>/dev/null || true
+		if strings -a /tmp/hydra-testbed-wire.pcap 2>/dev/null | grep -qiE "GET / HTTP|HTTP/1\.[01] 200|SimpleHTTP"; then
+			fail "plaintext HTTP strings found on the wire -- encryption is broken"
+		else
+			log "PASS: no plaintext found in $(wc -c </tmp/hydra-testbed-wire.pcap 2>/dev/null || echo 0) bytes of captured wire traffic"
+		fi
+	else
+		log "SKIP: tcpdump not installed"
+	fi
+
+	kill "$HTTPD_PID" 2>/dev/null || true
 else
-	log "SKIP: tcpdump not installed"
+	log "SKIP: python3 not installed, cannot host local HTTP gate target"
 fi
 
 log "gate: throughput through tunnel (single path, unshaped -- see README for netem-capped numbers where available)"

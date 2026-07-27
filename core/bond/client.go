@@ -49,7 +49,7 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 
 	init, err := crypto.NewInitiator(cfg.ClientKey, cfg.RelayPubKey)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: new initiator: %w", err)
 	}
 
@@ -64,12 +64,12 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 
 	initMsg, err := init.WriteInit(nil)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: write handshake init: %w", err)
 	}
 	initPkt := make([]byte, proto.OuterPrefixLen+len(initMsg))
 	if err := proto.MarshalOuter(initPkt, proto.OuterHeader{Type: proto.TypeHandshakeInit, Version: proto.Version}); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, HandshakeRespPayload{}, err
 	}
 	copy(initPkt[proto.OuterPrefixLen:], initMsg)
@@ -83,7 +83,10 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 			lastErr = fmt.Errorf("bond: send handshake init: %w", err)
 			continue
 		}
-		conn.SetReadDeadline(time.Now().Add(handshakeTO))
+		if err := conn.SetReadDeadline(time.Now().Add(handshakeTO)); err != nil {
+			lastErr = fmt.Errorf("bond: set read deadline: %w", err)
+			continue
+		}
 		n, err := conn.Read(respBuf)
 		if err != nil {
 			lastErr = fmt.Errorf("bond: handshake response timeout: %w", err)
@@ -109,9 +112,9 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 		lastErr = nil
 		break
 	}
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 	if lastErr != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, HandshakeRespPayload{}, lastErr
 	}
 
@@ -157,13 +160,13 @@ func (t *ClientTunnel) Run(ctx context.Context) error {
 	go func() { errCh <- t.netToTun(ctx) }()
 	select {
 	case <-ctx.Done():
-		t.conn.Close()
-		t.dev.Close()
+		_ = t.conn.Close()
+		_ = t.dev.Close()
 		<-errCh
 		return ctx.Err()
 	case err := <-errCh:
-		t.conn.Close()
-		t.dev.Close()
+		_ = t.conn.Close()
+		_ = t.dev.Close()
 		return err
 	}
 }

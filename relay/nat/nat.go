@@ -27,5 +27,5 @@ func Masquerade(tunnelCIDR, egressIface string) (cleanup func(), err error) {
 	if out, err := exec.Command("iptables", add...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("nat: iptables masquerade: %w: %s", err, out)
 	}
-	return func() { exec.Command("iptables", del...).Run() }, nil
+	return func() { _ = exec.Command("iptables", del...).Run() }, nil
 }

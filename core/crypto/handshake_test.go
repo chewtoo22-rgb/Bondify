@@ -101,7 +101,9 @@ func TestNonceNeverReusedAcrossPaths(t *testing.T) {
 	initiator, _ := NewInitiator(clientKP, relayKP.Public)
 	responder, _ := NewResponder(relayKP)
 	initMsg, _ := initiator.WriteInit(nil)
-	responder.ReadInit(initMsg)
+	if _, _, err := responder.ReadInit(initMsg); err != nil {
+		t.Fatalf("read init: %v", err)
+	}
 	respMsg, _, _ := responder.WriteResponse(nil)
 	_, clientSess, err := initiator.ReadResponse(respMsg)
 	if err != nil {
