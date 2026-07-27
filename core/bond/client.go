@@ -140,6 +140,8 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 		dev:          dev,
 		sess:         sess,
 		sessionIndex: respPayload.SessionIndex,
+		tunnelIP:     respPayload.TunnelIP,
+		startedAt:    time.Now(),
 		mtu:          mtu,
 		sched:        sched.NewRoundRobin(),
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
@@ -249,6 +251,8 @@ type ClientTunnel struct {
 	dev          tun.Device
 	sess         *crypto.Session
 	sessionIndex uint32
+	tunnelIP     string
+	startedAt    time.Time
 	mtu          int
 
 	sched      sched.Scheduler

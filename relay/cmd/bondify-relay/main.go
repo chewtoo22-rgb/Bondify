@@ -17,6 +17,7 @@ import (
 
 	"github.com/chewtoo22-rgb/bondify/core/bond"
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
+	"github.com/chewtoo22-rgb/bondify/core/diag"
 	"github.com/chewtoo22-rgb/bondify/core/proto"
 	"github.com/chewtoo22-rgb/bondify/core/tun"
 	"github.com/chewtoo22-rgb/bondify/relay/nat"
@@ -32,6 +33,7 @@ func main() {
 		dnsList   = flag.String("dns", "1.1.1.1,9.9.9.9", "comma-separated DNS servers pushed to clients")
 		natIface  = flag.String("nat-iface", "", "if set, enable ip_forward + MASQUERADE(pool -> this interface) for internet egress")
 		keepalive = flag.Int("keepalive", 15, "NAT keepalive interval seconds, pushed to clients")
+		diagAddr  = flag.String("diag-addr", "127.0.0.1:9091", "localhost address to serve live JSON diagnostics on, one entry per connected session (GET /api/v1/diagnostics); empty disables it")
 	)
 	flag.Parse()
 
@@ -96,6 +98,24 @@ func main() {
 	go func() { errCh <- r.ServeUDP() }()
 	go func() { errCh <- r.ServeTUN() }()
 	go r.ServeReorder(ctx)
+
+	if *diagAddr != "" {
+		srv, err := diag.NewServer(*diagAddr, func() any { return r.Diagnostics() })
+		if err != nil {
+			log.Printf("relay: warning: diagnostics endpoint disabled: %v", err)
+		} else {
+			log.Printf("relay: diagnostics endpoint listening on http://%s/api/v1/diagnostics", srv.Addr())
+			go func() {
+				if err := srv.Serve(); err != nil {
+					log.Printf("relay: diagnostics endpoint error: %v", err)
+				}
+			}()
+			go func() {
+				<-ctx.Done()
+				_ = srv.Close()
+			}()
+		}
+	}
 
 	log.Printf("relay: listening on %s (protocol BOND/%d)", *listen, proto.Version)
 	select {

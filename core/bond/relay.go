@@ -32,6 +32,7 @@ type relaySession struct {
 	sessionIndex uint32
 	sess         *crypto.Session
 	tunnelIP     net.IP
+	startedAt    time.Time
 
 	pathsMu sync.RWMutex
 	paths   map[uint8]*Path
@@ -49,6 +50,7 @@ func newRelaySession(sessionIndex uint32, sess *crypto.Session, tunnelIP net.IP)
 		sessionIndex: sessionIndex,
 		sess:         sess,
 		tunnelIP:     tunnelIP,
+		startedAt:    time.Now(),
 		paths:        make(map[uint8]*Path),
 		sched:        sched.NewRoundRobin(),
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),

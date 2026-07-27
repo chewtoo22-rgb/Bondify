@@ -41,6 +41,19 @@ const (
 	RoleDisabled
 )
 
+func (r Role) String() string {
+	switch r {
+	case RoleBond:
+		return "BOND"
+	case RoleBackup:
+		return "BACKUP"
+	case RoleDisabled:
+		return "DISABLED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // Path is the minimal read-only view a Scheduler needs of a path's current condition.
 // core/bond's Path type implements this; core/sched deliberately has no dependency on
 // core/bond, so the scheduler is independently testable and swappable.

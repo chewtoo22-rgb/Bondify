@@ -19,6 +19,7 @@ import (
 
 	"github.com/chewtoo22-rgb/bondify/core/bond"
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
+	"github.com/chewtoo22-rgb/bondify/core/diag"
 	"github.com/chewtoo22-rgb/bondify/core/tun"
 )
 
@@ -32,6 +33,7 @@ func main() {
 		defRoute    = flag.Bool("default-route", false, "replace the default route with one via the tunnel")
 		extraRoutes = flag.String("routes", "", "comma-separated extra CIDRs to route via the tunnel")
 		localAddrs  = flag.String("local-addrs", "", "comma-separated local bind IPs, one per uplink/path; append @device to pin a path's egress interface (e.g. 10.60.0.1@wlan0,10.61.0.1@wwan0); omit for a single system-chosen-source path")
+		diagAddr    = flag.String("diag-addr", "127.0.0.1:9090", "localhost address to serve live JSON diagnostics on (GET /api/v1/diagnostics); empty disables it")
 	)
 	flag.Parse()
 
@@ -131,6 +133,24 @@ func main() {
 	log.Printf("client: tun %s up at %s, routes=%v", *tunName, localCIDR, routes)
 
 	go statsLoop(ctx, t)
+
+	if *diagAddr != "" {
+		srv, err := diag.NewServer(*diagAddr, func() any { return t.Diagnostics() })
+		if err != nil {
+			log.Printf("client: warning: diagnostics endpoint disabled: %v", err)
+		} else {
+			log.Printf("client: diagnostics endpoint listening on http://%s/api/v1/diagnostics", srv.Addr())
+			go func() {
+				if err := srv.Serve(); err != nil {
+					log.Printf("client: diagnostics endpoint error: %v", err)
+				}
+			}()
+			go func() {
+				<-ctx.Done()
+				_ = srv.Close()
+			}()
+		}
+	}
 
 	if err := t.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("client: tunnel error: %v", err)

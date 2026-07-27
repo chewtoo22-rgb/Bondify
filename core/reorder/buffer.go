@@ -7,6 +7,7 @@ package reorder
 import (
 	"container/heap"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,6 +39,8 @@ type Buffer struct {
 	headGSN      uint64
 	headSet      bool
 	timer        *time.Timer
+
+	forcedReleases atomic.Uint64
 
 	out chan Packet
 }
@@ -102,6 +105,17 @@ func (b *Buffer) Occupancy() int {
 	return b.curBytes
 }
 
+// MaxBytes reports the buffer's clamped soft ceiling, for diagnostics/UI gauges.
+func (b *Buffer) MaxBytes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maxBytes
+}
+
+// ForcedReleases counts how many times a gap was declared lost and released early (on
+// deadline expiry or overflow), for diagnostics -- distinct from ordinary in-order drains.
+func (b *Buffer) ForcedReleases() uint64 { return b.forcedReleases.Load() }
+
 // Push inserts a received packet and delivers everything now releasable. Duplicate or
 // already-passed GSNs are dropped silently (this is also where REDUNDANT mode's dedup
 // happens for free at a layer above the AEAD replay window, matching PROTOCOL.md §3.2's
@@ -158,6 +172,7 @@ func (b *Buffer) forceReleaseHeadLocked() {
 	pkt := heap.Pop(&b.h).(Packet)
 	b.curBytes -= pkt.size()
 	b.nextExpected = pkt.GSN + 1
+	b.forcedReleases.Add(1)
 	b.emitLocked(pkt)
 }
 

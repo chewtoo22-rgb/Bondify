@@ -78,6 +78,17 @@ sudo ./build/bondify -relay <relay-host>:51820 -relay-pubkey <printed-key> \
      -tun bondify0 -default-route
 ```
 
+## Live diagnostics
+
+Both binaries serve their current stats as JSON on a **localhost-only** HTTP endpoint —
+`GET /api/v1/diagnostics` — so a dashboard (or `curl`) can poll live numbers instead of
+scraping log lines. Client: `http://127.0.0.1:9090/api/v1/diagnostics` (per-path RTT/loss/
+throughput plus the bonded aggregate and reorder buffer occupancy for its one session).
+Relay: `http://127.0.0.1:9091/api/v1/diagnostics` (the same shape, once per connected
+client session). Override with `-diag-addr`, or pass `-diag-addr ""` to disable it. It
+binds to loopback by design — see `core/diag`'s doc comment for why exposing this anywhere
+else would leak live per-path remote addresses to whatever network it's reachable from.
+
 `testbed/run.sh` stands up an isolated network-namespace rig (client ns + relay ns, relay
 bridged to a real internet-facing egress) and runs the Phase 1 gate end to end — Noise
 handshake, ping and HTTP through the tunnel against a real internet host, a `tcpdump`
