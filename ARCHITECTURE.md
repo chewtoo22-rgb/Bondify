@@ -294,14 +294,17 @@ reporting, no account, no default relay logging; reproducible builds.
   cwnd shrinks) without the full phase state machine. Revisit when ACK timing and
   per-original-path delivery accounting are wired into congestion control. See
   `core/cc/cc.go`'s package doc comment.
-- **`core/cc.Controller` only receives real samples on the client side.** It's fed from
+- **`core/cc.Controller` only receives real delivery-rate samples on the client side.**
+  It's fed from
   `HandleProbeAck`'s existing PSN-delta bookkeeping (already used for loss, extended to also
   track bytes sent since the last probe), and only the client runs the probe-driven state
   machine at all (see this file's existing note on that asymmetry, above `core/bond/path.go`
-  in the repo). A relay-side path's `CWND()` therefore stays at `core/cc`'s generous initial
-  value rather than adapting — acceptable for now since it only under-constrains the relay's
-  own return-traffic scheduling, never the client's. Symmetric relay-initiated probing
-  (already flagged as future work) would close this gap.
+  in the repo). Authenticated ACK telemetry now carries the client's per-path minimum RTT,
+  so the relay can distinguish fast and slow paths for return-traffic scheduling even
+  without initiating probes itself. A relay-side path's `CWND()` still stays at `core/cc`'s
+  generous initial value rather than adapting — acceptable for now since it only
+  under-constrains the relay's own return-traffic scheduling, never the client's. Symmetric
+  relay-initiated probing or per-original-path ACK timing would close the remaining gap.
 - **Fixed two real bugs in Tier 3/4's fastest-path tie-breaking, found by a real CI run, not
   code inspection.** First: a homogeneous two-path CI run showed `hol-aware` at roughly half
   of `round-robin`'s throughput. Root cause: a strict single-winner RTT comparison let one
@@ -311,9 +314,10 @@ reporting, no account, no default relay logging; reproducible builds.
   it anything to prove itself against. Fixed by having `fastestTiedSet` treat paths within a
   small RTT tolerance as tied and round-robin among them (`core/sched/tier3_min_rtt_cwnd.go`
   and `tier4_hol_aware.go`), which also fixes the identical latent issue in Tier 3.
-  Second, surfaced immediately by the first fix: the relay side never actively probes (see
-  the asymmetry entry above), so relay-side paths' `RTTMin()` is always the unmeasured
-  sentinel — `fastestTiedSet` returned an *empty* tied set in that case, and the fallback
+  Second, surfaced immediately by the first fix: before authenticated RTT feedback was
+  added, the relay side never actively probed, so relay-side paths' `RTTMin()` began at the
+  unmeasured sentinel — `fastestTiedSet` returned an *empty* tied set in that case, and the
+  fallback
   path's own tie-breaking (`rtt < slowRTT` starting from the same sentinel) meant a
   candidate whose RTT was itself the sentinel could never win either. Together these made
   the relay-side scheduler return `nil` forever, and a real two-path tunnel's return traffic
