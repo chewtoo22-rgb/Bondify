@@ -132,9 +132,34 @@ func TestACKStateDelayedACKAndVersionSafety(t *testing.T) {
 	}
 
 	a.Observe(1, now.Add(AckMaxDelay))
-	a.MarkSent(s.version)
+	a.MarkSent(s.version, now.Add(AckMaxDelay))
+	if _, ok := a.SnapshotIfDue(now.Add(2*AckMaxDelay - time.Nanosecond)); ok {
+		t.Fatal("newer receive event inherited the old snapshot's expired timer")
+	}
 	if _, ok := a.SnapshotIfDue(now.Add(2 * AckMaxDelay)); !ok {
 		t.Fatal("old snapshot incorrectly cleared a newer receive event")
+	}
+}
+
+func TestACKStateSentSnapshotDoesNotRetainCoveredPacketCount(t *testing.T) {
+	a := newACKState()
+	now := time.Unix(1_700_000_000, 0)
+	for gsn := uint64(0); gsn < AckEveryPackets; gsn++ {
+		a.Observe(gsn, now)
+	}
+	s, ok := a.SnapshotIfDue(now)
+	if !ok {
+		t.Fatal("packet threshold should make ACK due")
+	}
+
+	// Model another path delivering one packet while the snapshot is written.
+	a.Observe(AckEveryPackets, now.Add(time.Millisecond))
+	a.MarkSent(s.version, now.Add(2*time.Millisecond))
+	if _, ok := a.SnapshotIfDue(now.Add(2 * time.Millisecond)); ok {
+		t.Fatal("covered packet count caused a back-to-back ACK")
+	}
+	if _, ok := a.SnapshotIfDue(now.Add(2*time.Millisecond + AckMaxDelay)); !ok {
+		t.Fatal("concurrent receive event did not remain pending")
 	}
 }
 
@@ -146,7 +171,7 @@ func TestACKStateSendsOneUrgentACKPerGap(t *testing.T) {
 	if !ok {
 		t.Fatal("first report of a gap should be urgent")
 	}
-	a.MarkSent(first.version)
+	a.MarkSent(first.version, now)
 
 	a.Observe(2, now.Add(time.Millisecond))
 	if _, ok := a.SnapshotIfDue(now.Add(time.Millisecond)); ok {
@@ -157,7 +182,7 @@ func TestACKStateSendsOneUrgentACKPerGap(t *testing.T) {
 	}
 
 	a.Observe(0, now.Add(2*AckMaxDelay))
-	a.MarkSent(a.version)
+	a.MarkSent(a.version, now.Add(2*AckMaxDelay))
 	a.Observe(4, now.Add(2*AckMaxDelay))
 	if _, ok := a.SnapshotIfDue(now.Add(2 * AckMaxDelay)); !ok {
 		t.Fatal("new cumulative gap should get a new urgent ACK")
