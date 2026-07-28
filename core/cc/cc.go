@@ -5,8 +5,10 @@
 //
 // Simplification, tracked honestly: real BBR cycles pacing_gain through
 // STARTUP/DRAIN/PROBE_BW/PROBE_RTT phases, driven by a per-RTT (often per-ACK) delivery
-// rate sample. BOND/1 today only has periodic PROBE/PROBE_ACK round trips (no per-packet
-// ACK), so there is no per-RTT signal to cycle a gain schedule against. Controller instead
+// rate sample. BOND/1 now has per-packet ACK/SACK feedback, but Controller is still fed by
+// periodic PROBE/PROBE_ACK delivery samples; the ACK path does not yet attribute delivery
+// timing back to each original path. There is therefore no trustworthy per-RTT signal to
+// cycle a gain schedule against. Controller instead
 // uses a single fixed gain over a windowed max-filtered delivery-rate estimate, which
 // captures the core formula (cwnd = btl_bw * rt_prop * gain) and the core self-correcting
 // property (a stalled path's rate ages out of the window and its cwnd shrinks) without the
