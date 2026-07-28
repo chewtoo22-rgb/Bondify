@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bondify_primary">#1B2A4A</color>
+    <color name="bondify_primary_dark">#101A30</color>
+    <color name="bondify_accent">#3DDC97</color>
+    <color name="bondify_bg">#F5F7FA</color>
+</resources>

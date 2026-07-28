@@ -1,3 +1,11 @@
 /build/
 *.pcap
 *.key
+
+# Android: local SDK path, generated build outputs, and the gomobile-built AAR (~14MB of
+# per-ABI native libs -- see mobile/build_aar.sh; android/app/build.gradle.kts regenerates
+# it automatically as part of the Gradle build).
+android/local.properties
+android/**/build/
+android/.gradle/
+android/app/libs/

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two overlapping links, standing in for "two paths bonded into one"; kept as a plain
+     vector rather than a raster asset so the repo doesn't need to carry per-density PNGs. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M38,42 L54,42 A16,16 0 0 1 54,74 L46,74"
+        android:strokeColor="#3DDC97"
+        android:strokeWidth="9"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M70,66 L54,66 A16,16 0 0 1 54,34 L62,34"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="9"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+</vector>
