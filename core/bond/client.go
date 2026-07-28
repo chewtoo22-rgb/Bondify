@@ -56,7 +56,10 @@ type ClientConfig struct {
 // DialClient performs the Noise_IK handshake on path 0, then registers any additional
 // paths from cfg.Paths via PATH_ADD, and returns a ready multi-path ClientTunnel. It does
 // not touch the TUN device's IP/routes -- see core/tun's platform helpers, invoked by the
-// caller (cmd/bondify) using the returned Cfg.
+// DialClient establishes a client tunnel to the configured relay and registers
+// the configured uplinks. It returns the negotiated handshake parameters; uplinks
+// that fail to register are recorded on the tunnel while the tunnel remains usable
+// with the paths that succeeded.
 func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) (*ClientTunnel, HandshakeRespPayload, error) {
 	raddr, err := net.ResolveUDPAddr("udp", cfg.RelayAddr)
 	if err != nil {

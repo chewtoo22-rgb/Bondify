@@ -58,7 +58,8 @@ func New(deadline time.Duration, maxBytes int) *Buffer {
 // to arrive first — it must reflect the session's actual starting sequence number (0 for
 // a fresh session), or a lost first packet would never be noticed and later duplicates
 // would never be rejected. Getters/setters for mid-session GSN reassignment aren't needed:
-// a single Buffer covers one session's lifetime in one direction.
+// NewFrom creates a reordering buffer beginning at the specified sequence number.
+// The deadline and maximum buffer size are constrained to their supported ranges.
 func NewFrom(startGSN uint64, deadline time.Duration, maxBytes int) *Buffer {
 	if deadline < DefaultDeadlineMin {
 		deadline = DefaultDeadlineMin

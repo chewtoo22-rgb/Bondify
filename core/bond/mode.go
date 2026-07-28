@@ -31,7 +31,8 @@ func (m Mode) String() string {
 	}
 }
 
-// ModeFromString parses a -mode flag value. Empty defaults to SPEED.
+// ModeFromString parses a transmission mode string, defaulting an empty string to speed mode.
+// It returns an error for unrecognized values.
 func ModeFromString(s string) (Mode, error) {
 	switch s {
 	case "", "speed":
@@ -51,7 +52,9 @@ const DupFactor = 2
 // RTT (redundancy is most valuable spent on healthy paths -- duplicating onto a path
 // that's already struggling buys little). Fewer than n eligible paths is not an error:
 // send on however many exist. A copy of the underlying slice is sorted in place, so
-// callers must pass a slice they own (e.g. from ClientTunnel.Paths(), already a copy).
+// selectRedundantPaths returns up to n active bond paths with available congestion
+// window, ordered by ascending minimum round-trip time. Non-positive round-trip
+// times are placed last.
 func selectRedundantPaths(paths []*Path, n int) []*Path {
 	elig := make([]*Path, 0, len(paths))
 	for _, p := range paths {
@@ -77,7 +80,8 @@ func selectRedundantPaths(paths []*Path, n int) []*Path {
 
 // healthiestPath returns the ACTIVE+BOND path with the lowest Loss() (ties broken by
 // lowest RTT), or nil if none are eligible. Used to place FEC parity on "the least loaded
-// path, never the lossy one" (ARCHITECTURE.md §2.3).
+// healthiestPath selects the active bond path with the lowest packet loss, using
+// minimum RTT as a tie-breaker, and returns nil when no eligible path exists.
 func healthiestPath(paths []*Path) *Path {
 	var best *Path
 	var bestLoss float64

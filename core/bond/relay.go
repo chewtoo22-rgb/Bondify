@@ -57,6 +57,8 @@ type relaySession struct {
 	Stats Stats
 }
 
+// newRelaySession creates and initializes a relay session with its scheduler, path
+// storage, reorder buffer, traffic mode, and optional forward error correction state.
 func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnelIP net.IP, cfg RelayConfig) *relaySession {
 	scheduler, err := sched.New(cfg.Scheduler)
 	if err != nil {
