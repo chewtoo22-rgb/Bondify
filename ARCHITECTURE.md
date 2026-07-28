@@ -376,3 +376,16 @@ reporting, no account, no default relay logging; reproducible builds.
   unrecovered, which is what repeated real runs now show (0.115%, 0.312%) — comfortably
   under 1%, with real headroom rather than a coin-flip pass. See `core/fec/fec.go`'s
   `LossScale` doc comment.
+- **`-fec` defaults to `false` on both binaries, found by a real CI regression on this PR's
+  own `netem-gates` job.** It originally defaulted to `true` ("costs nothing at zero loss",
+  per the flag's own now-corrected help text), but that's not literally true as
+  implemented: `fecSender.Record` copies and stores every packet's full inner plaintext
+  into the current generation's shard slice regardless of whether any parity will end up
+  being computed for it, since the redundancy decision (`m`) isn't known until the
+  generation closes. That's real per-packet allocation/copy overhead on the hot send path
+  even on a perfectly clean link. `testbed/run_phase2.sh`/`run_phase3.sh` predate the `-fec`
+  flag and don't pass it, so a `true` default silently added this cost to their gates too —
+  caught for real when this PR's CI ran Phase 2's 2×50Mbit/20ms two-path throughput gate on
+  a real GitHub Actions runner and measured 74.9 Mbps against the required >80 Mbps (previously
+  passing). `testbed/run_phase4.sh` explicitly passes `-fec=true` on every invocation, so its
+  own gate is unaffected by the default.

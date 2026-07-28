@@ -36,7 +36,7 @@ func main() {
 		diagAddr  = flag.String("diag-addr", "127.0.0.1:9091", "localhost address to serve live JSON diagnostics on, one entry per connected session (GET /api/v1/diagnostics); empty disables it")
 		scheduler = flag.String("scheduler", "round-robin", "scheduling tier for the relay's own return traffic: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
 		mode      = flag.String("mode", "speed", "sending mode for the relay's own return traffic: speed or redundant")
-		fec       = flag.Bool("fec", true, "adaptive Reed-Solomon FEC on the relay's own return traffic")
+		fec       = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on the relay's own return traffic; opt-in since it copies every packet into a generation buffer even at zero loss")
 	)
 	flag.Parse()
 

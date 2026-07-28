@@ -36,7 +36,7 @@ func main() {
 		diagAddr    = flag.String("diag-addr", "127.0.0.1:9090", "localhost address to serve live JSON diagnostics on (GET /api/v1/diagnostics); empty disables it")
 		scheduler   = flag.String("scheduler", "round-robin", "scheduling tier: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
 		mode        = flag.String("mode", "speed", "sending mode: speed (scheduler-picked single path per packet) or redundant (duplicate onto 2 paths)")
-		fec         = flag.Bool("fec", true, "adaptive Reed-Solomon FEC on speed-mode traffic; redundancy scales with observed loss and costs nothing at zero loss")
+		fec         = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on speed-mode traffic; redundancy scales with observed loss, but even at zero loss still copies every packet into a generation buffer, so it's opt-in rather than a free default")
 	)
 	flag.Parse()
 
