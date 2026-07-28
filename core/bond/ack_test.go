@@ -11,7 +11,7 @@ func TestACKPayloadCBORRoundTrip(t *testing.T) {
 		HasCumulative:   true,
 		CumulativeGSN:   8,
 		SACK:            []AckRange{{Start: 10, End: 12}, {Start: 15, End: 15}},
-		PathCounters:    []AckPathCounter{{PathID: 0, Received: 40}, {PathID: 2, Received: 9}},
+		PathCounters:    []AckPathCounter{{PathID: 0, Received: 40, RTTUsec: 15_000}, {PathID: 2, Received: 9, RTTUsec: 200_000}},
 		ReorderBytes:    1234,
 		ReorderDeadline: 20,
 	}
@@ -25,6 +25,32 @@ func TestACKPayloadCBORRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("ACK round trip = %#v, want %#v", got, want)
+	}
+}
+
+func TestACKPathStateSharesRTTWithUnprobedPeer(t *testing.T) {
+	fast := NewPath(0, nil)
+	slow := NewPath(1, nil)
+	applyACKPathState(AckPayload{PathCounters: []AckPathCounter{
+		{PathID: 0, RTTUsec: 15_000},
+		{PathID: 1, RTTUsec: 200_000},
+		{PathID: 9, RTTUsec: 1}, // unknown paths are ignored
+	}}, []*Path{fast, slow})
+
+	if got := fast.RTTMin(); got != 15*time.Millisecond {
+		t.Fatalf("fast peer RTT = %s, want 15ms", got)
+	}
+	if got := slow.RTTMin(); got != 200*time.Millisecond {
+		t.Fatalf("slow peer RTT = %s, want 200ms", got)
+	}
+}
+
+func TestACKPathCountersIncludeMeasuredRTT(t *testing.T) {
+	p := NewPath(3, nil)
+	p.SetPeerRTTMin(27 * time.Millisecond)
+	got := ackPathCounters([]*Path{p})
+	if len(got) != 1 || got[0].PathID != 3 || got[0].RTTUsec != 27_000 {
+		t.Fatalf("path counters = %#v, want path 3 with 27000us RTT", got)
 	}
 }
 
