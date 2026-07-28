@@ -761,7 +761,9 @@ func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
 			if err := unmarshalCBOR(payload, &ack); err != nil {
 				continue
 			}
-			p.HandleProbeAck(ack, time.Now())
+			now := time.Now()
+			p.HandleProbeAck(ack, now)
+			t.ack.RequestFeedback(now)
 		case proto.TypeProbe:
 			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
 			if err != nil {
