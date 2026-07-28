@@ -112,6 +112,32 @@ func TestACKStateDelayedACKAndVersionSafety(t *testing.T) {
 	}
 }
 
+func TestACKStateSendsOneUrgentACKPerGap(t *testing.T) {
+	a := newACKState()
+	now := time.Unix(1_700_000_000, 0)
+	a.Observe(1, now)
+	first, ok := a.SnapshotIfDue(now)
+	if !ok {
+		t.Fatal("first report of a gap should be urgent")
+	}
+	a.MarkSent(first.version)
+
+	a.Observe(2, now.Add(time.Millisecond))
+	if _, ok := a.SnapshotIfDue(now.Add(time.Millisecond)); ok {
+		t.Fatal("same gap produced another immediate ACK")
+	}
+	if _, ok := a.SnapshotIfDue(now.Add(time.Millisecond + AckMaxDelay)); !ok {
+		t.Fatal("persistent gap did not fall back to delayed-ACK timer")
+	}
+
+	a.Observe(0, now.Add(2*AckMaxDelay))
+	a.MarkSent(a.version)
+	a.Observe(4, now.Add(2*AckMaxDelay))
+	if _, ok := a.SnapshotIfDue(now.Add(2 * AckMaxDelay)); !ok {
+		t.Fatal("new cumulative gap should get a new urgent ACK")
+	}
+}
+
 func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
