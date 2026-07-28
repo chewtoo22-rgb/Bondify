@@ -409,7 +409,7 @@ func ackPathCounters(paths []*Path) []AckPathCounter {
 
 func fillACKReceiverState(ack *AckPayload, paths []*Path, b *reorder.Buffer) {
 	ack.PathCounters = ackPathCounters(paths)
-	if n := b.Occupancy(); n > math.MaxUint32 {
+	if n := b.Occupancy(); uint64(n) > uint64(math.MaxUint32) {
 		ack.ReorderBytes = math.MaxUint32
 	} else {
 		ack.ReorderBytes = uint32(n)
