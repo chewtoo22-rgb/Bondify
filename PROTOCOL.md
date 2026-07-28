@@ -220,7 +220,7 @@ The BOND/1 v1 implementation encodes the authenticated ACK body as CBOR with the
 Detecting a gap sends an ACK immediately rather than waiting for the delayed-ACK limit.
 An unacknowledged GSN becomes eligible for fast retransmission after three ACKs report a
 SACKed successor, preventing ordinary reordering from being mistaken for loss. The grace
-period is 10 ms for a single-path session and 250 ms when ACK path counters report multiple
+period is 10 ms for a single-path session and 1 s when ACK path counters report multiple
 paths, where normal cross-path reordering is wider; this also lets an in-flight FEC shard
 repair the hole first. Every
 retransmission uses a fresh path PSN and AEAD nonce and sets `RTX`; it is not inserted back
@@ -229,7 +229,7 @@ into the original FEC generation.
 Senders retain at most 4096 packets / 8 MiB, retransmit at most 64 packets per maintenance
 tick, and abandon a packet after three retries. Timeout retransmission uses twice the
 lowest active path's minimum RTT, clamped to 100 ms–1 s (200 ms while unmeasured), with a
-250 ms floor while multiple paths are active so shaped queues do not create a retry
+1 s floor while multiple paths are active so shaped queues do not create a retry
 feedback loop. These bounds are part of the denial-of-service surface and must not be
 removed without replacing them with equally strict accounting.
 
