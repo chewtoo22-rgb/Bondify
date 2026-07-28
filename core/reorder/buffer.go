@@ -100,6 +100,13 @@ func (b *Buffer) SetDeadline(d time.Duration) {
 	b.mu.Unlock()
 }
 
+// Deadline reports the currently configured reorder deadline for ACK telemetry.
+func (b *Buffer) Deadline() time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.deadline
+}
+
 // Occupancy reports current buffered byte count, for ACK reporting back to the sender.
 func (b *Buffer) Occupancy() int {
 	b.mu.Lock()
