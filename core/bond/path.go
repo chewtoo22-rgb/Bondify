@@ -12,12 +12,18 @@ import (
 
 // Default constants from PROTOCOL.md's Appendix.
 const (
-	ProbeInterval            = 200 * time.Millisecond
-	ProbeIdleAfter           = 30 * time.Second
-	ProbeIdleInterval        = 1 * time.Second
-	PathDeadTimeout          = 10 * time.Second
+	ProbeInterval         = 200 * time.Millisecond
+	ProbeIdleAfter        = 30 * time.Second
+	ProbeIdleInterval     = 1 * time.Second
+	PathDeadTimeout       = 10 * time.Second
+	MissedProbesToDegrade = 3
+	// RelayPathDegradeTimeout is the relay-side fast-fail threshold. The client sends a
+	// probe every ProbeInterval while a path is active, so silence for the same three
+	// intervals the client uses for MissedProbesToDegrade is enough to stop scheduling
+	// new return traffic onto that path. The path is retained until PathDeadTimeout so an
+	// authenticated probe can restore it without rebuilding the session.
+	RelayPathDegradeTimeout  = MissedProbesToDegrade * ProbeInterval
 	DegradeLoss              = 0.15
-	MissedProbesToDegrade    = 3
 	HealthyProbesToUndegrade = 3
 	rttWindow                = 10 * time.Second
 	lossEWMAAlpha            = 0.2
@@ -126,11 +132,21 @@ func (p *Path) RecordRecv() uint32 {
 // LastActivity reports how long it has been since any packet was recorded received on
 // this path (DATA or PROBE) -- the relay's simplified liveness signal.
 func (p *Path) LastActivity() time.Duration {
+	return p.LastActivityAt(time.Now())
+}
+
+// LastActivityAt is LastActivity with an injected clock, used by the relay liveness state
+// machine so its exact threshold transitions can be tested without sleeping.
+func (p *Path) LastActivityAt(now time.Time) time.Duration {
 	last := p.lastProbeAckAt.Load()
 	if last == 0 {
 		return 0
 	}
-	return time.Since(time.Unix(0, last))
+	age := now.Sub(time.Unix(0, last))
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 // BuildProbe returns the payload for the next outgoing PROBE on this path.
