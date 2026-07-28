@@ -219,8 +219,10 @@ The BOND/1 v1 implementation encodes the authenticated ACK body as CBOR with the
 
 Detecting a gap sends an ACK immediately rather than waiting for the delayed-ACK limit.
 An unacknowledged GSN becomes eligible for fast retransmission after three ACKs report a
-SACKed successor, preventing ordinary multipath reordering from being mistaken for loss.
-A short 10 ms grace period then lets an in-flight FEC shard repair it first. Every
+SACKed successor, preventing ordinary reordering from being mistaken for loss. The grace
+period is 10 ms for a single-path session and 50 ms when ACK path counters report multiple
+paths, where normal cross-path reordering is wider; this also lets an in-flight FEC shard
+repair the hole first. Every
 retransmission uses a fresh path PSN and AEAD nonce and sets `RTX`; it is not inserted back
 into the original FEC generation.
 
