@@ -284,14 +284,16 @@ reporting, no account, no default relay logging; reproducible builds.
   shared output stream. See `core/sched/tier2_weighted_goodput.go`'s doc comment.
 - **`core/cc`'s congestion control is a simplified BBR, not the full phase-cycling state
   machine.** Real BBR cycles `pacing_gain` through STARTUP/DRAIN/PROBE_BW/PROBE_RTT phases,
-  driven by a per-RTT (often per-ACK) delivery-rate sample. BOND/1 has no per-packet ACK
-  yet — only periodic `PROBE`/`PROBE_ACK` round trips (`ProbeInterval` = 200ms) — so there
-  is no per-RTT signal to cycle a gain schedule against. `core/cc.Controller` uses a single
+  driven by a per-RTT (often per-ACK) delivery-rate sample. BOND/1 now carries per-packet
+  ACK/SACK feedback, but `core/cc.Controller` is still fed by the older periodic
+  `PROBE`/`PROBE_ACK` samples (`ProbeInterval` = 200ms); the ACK path has not yet been
+  promoted into a full BBR delivery-rate sampler. `core/cc.Controller` uses a single
   fixed gain (2.0, matching the spec's formula) over a windowed max-filtered delivery-rate
   estimate instead, which captures the core formula (`cwnd = btl_bw * rt_prop * gain`) and
   the core self-correcting property (a stalled path's rate ages out of the window and its
-  cwnd shrinks) without the full phase state machine. Revisit once phase 4's per-packet ACKs
-  land. See `core/cc/cc.go`'s package doc comment.
+  cwnd shrinks) without the full phase state machine. Revisit when ACK timing and
+  per-original-path delivery accounting are wired into congestion control. See
+  `core/cc/cc.go`'s package doc comment.
 - **`core/cc.Controller` only receives real samples on the client side.** It's fed from
   `HandleProbeAck`'s existing PSN-delta bookkeeping (already used for loss, extended to also
   track bytes sent since the last probe), and only the client runs the probe-driven state
