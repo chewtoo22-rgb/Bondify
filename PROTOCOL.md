@@ -218,8 +218,9 @@ The BOND/1 v1 implementation encodes the authenticated ACK body as CBOR with the
 | `rms` | uint16 | Current reorder deadline in milliseconds. |
 
 Detecting a gap sends an ACK immediately rather than waiting for the delayed-ACK limit.
-An unacknowledged GSN below a SACKed successor becomes eligible for fast retransmission
-after a short 10 ms grace period so an in-flight FEC shard can repair it first. Every
+An unacknowledged GSN becomes eligible for fast retransmission after three ACKs report a
+SACKed successor, preventing ordinary multipath reordering from being mistaken for loss.
+A short 10 ms grace period then lets an in-flight FEC shard repair it first. Every
 retransmission uses a fresh path PSN and AEAD nonce and sets `RTX`; it is not inserted back
 into the original FEC generation.
 
