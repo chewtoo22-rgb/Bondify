@@ -749,7 +749,7 @@ func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
 			if err := unmarshalCBOR(payload, &ack); err != nil {
 				continue
 			}
-			t.rtx.Acknowledge(ack)
+			t.rtx.Acknowledge(ack, time.Now())
 			atomic.AddUint64(&t.Stats.RxAcks, 1)
 		case proto.TypeProbeAck:
 			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
