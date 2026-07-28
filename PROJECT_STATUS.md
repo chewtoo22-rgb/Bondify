@@ -41,8 +41,8 @@ Branch: `agent/ack-sack-retransmission`
   delayed-ACK policy and the lowest-RTT ACTIVE path.
 - Senders retain at most 4096 packets / 8 MiB, retry at most three times, and process at
   most 64 retransmissions per maintenance tick.
-- Fast retransmission waits 10 ms for FEC recovery, while timeout retransmission uses
-  2× minimum RTT clamped to 100 ms–1 s.
+- Fast retransmission requires three SACK reports of the same hole, then waits 10 ms for
+  FEC recovery; timeout retransmission uses 2× minimum RTT clamped to 100 ms–1 s.
 - Retransmissions receive a fresh PSN/AEAD nonce, carry `RTX`, and do not rejoin an old FEC
   generation.
 - Unit tests cover cumulative/SACK construction, the GSN-0 boundary, delayed-ACK version
