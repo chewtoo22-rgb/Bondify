@@ -23,8 +23,16 @@ type PathSpec struct {
 	// reach the *same* relay address: plain source-IP binding does not reliably control
 	// egress interface in that case (see core/tun/linux.go's DialUDPViaDevice doc for
 	// why). Leave empty for a single-path setup or when each uplink already has its own
-	// distinct default route.
+	// distinct default route. Ignored if Conn is set.
 	Device string
+	// Conn, if non-nil, is used directly as this path's UDP socket instead of dialing one
+	// internally (LocalAddr/Device are then ignored). Needed on platforms where Go itself
+	// has no privilege to pin a socket to a specific physical network: Android exposes that
+	// only as ConnectivityManager.Network.bindSocket, callable from Kotlin/Java, not
+	// SO_BINDTODEVICE from Go. The platform layer there dials, network-binds, and
+	// VpnService.protect()s the socket itself and hands the connected result in here (see
+	// mobile/mobile.go and android/app's BondifyVpnService.kt).
+	Conn *net.UDPConn
 }
 
 // ClientConfig configures a (possibly multi-path) client tunnel.
@@ -57,7 +65,28 @@ type ClientConfig struct {
 // paths from cfg.Paths via PATH_ADD, and returns a ready multi-path ClientTunnel. It does
 // not touch the TUN device's IP/routes -- see core/tun's platform helpers, invoked by the
 // caller (cmd/bondify) using the returned Cfg.
+//
+// dev/mtu are accepted here purely for convenience (most callers have both ready up front)
+// and just get forwarded to AttachTUN before returning -- see its doc comment for why a
+// platform that can't build its TUN interface until it already knows the relay-assigned
+// tunnel IP (Android's VpnService.Builder is fixed at construction time) needs the
+// handshake-then-attach split DialHandshake+AttachTUN expose instead of calling this.
 func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) (*ClientTunnel, HandshakeRespPayload, error) {
+	t, resp, err := DialHandshake(ctx, cfg)
+	if err != nil {
+		return nil, resp, err
+	}
+	t.AttachTUN(dev, mtu)
+	return t, resp, nil
+}
+
+// DialHandshake does everything DialClient does except attach a TUN device: the Noise_IK
+// handshake on path 0, PATH_ADD for any additional cfg.Paths, and full session setup. The
+// returned ClientTunnel is not yet ready for Run -- call AttachTUN first. Split out for
+// platforms where the TUN interface can't be built until the relay-assigned tunnel IP
+// (returned here in HandshakeRespPayload.TunnelIP) is already known; see AttachTUN's doc
+// comment.
+func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, HandshakeRespPayload, error) {
 	raddr, err := net.ResolveUDPAddr("udp", cfg.RelayAddr)
 	if err != nil {
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: resolve relay addr: %w", err)
@@ -155,12 +184,10 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 
 	t := &ClientTunnel{
 		relayAddr:    raddr,
-		dev:          dev,
 		sess:         sess,
 		sessionIndex: respPayload.SessionIndex,
 		tunnelIP:     respPayload.TunnelIP,
 		startedAt:    time.Now(),
-		mtu:          mtu,
 		sched:        scheduler,
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
 		paths:        []*Path{path0},
@@ -184,7 +211,22 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 	return t, respPayload, nil
 }
 
+// AttachTUN finishes setting up a ClientTunnel returned by DialHandshake, giving it the TUN
+// device and MTU that Run's packet pump needs. Must be called exactly once, before Run --
+// DialClient does this immediately for callers that already have both ready; a caller that
+// needs the handshake's result (e.g. the relay-assigned tunnel IP) before it can even build
+// its TUN device -- Android's VpnService.Builder is fixed at construction and can't be
+// reconfigured afterward, unlike a Linux TUN interface's IP/routes which are set well after
+// the device itself is opened -- calls DialHandshake and this separately instead.
+func (t *ClientTunnel) AttachTUN(dev tun.Device, mtu int) {
+	t.dev = dev
+	t.mtu = mtu
+}
+
 func dialPath(ctx context.Context, spec PathSpec, raddr *net.UDPAddr) (*net.UDPConn, error) {
+	if spec.Conn != nil {
+		return spec.Conn, nil
+	}
 	var laddr *net.UDPAddr
 	if spec.LocalAddr != "" {
 		ip := net.ParseIP(spec.LocalAddr)

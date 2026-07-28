@@ -238,6 +238,41 @@ support this separate loss-injection facility):
   — the actual FEC math was correct throughout; the loss it was being tested against wasn't
   reaching it the way real loss would.
 
+## Verified so far (Phase 5)
+
+Phase 5 is the Android client: a `gomobile`-bound wrapper around the same `core/bond` engine
+every other platform uses (`mobile/`), and a real Kotlin app (`android/app`) driving it —
+`VpnService` for the TUN interface, `ConnectivityManager.Network.bindSocket` +
+`VpnService.protect()` per uplink for Wi-Fi/cellular path selection (the Android equivalent
+of the Linux CLI's `SO_BINDTODEVICE`; see ARCHITECTURE.md §9), a foreground service +
+battery-optimization-exemption prompt aimed at surviving Doze with the screen off.
+
+**Read this section as narrowly as it's written.** ARCHITECTURE.md §5's actual gate is
+"Wi-Fi+cellular bonded > either alone; 30min screen-off survival" — that needs a real device
+with two live radios and real OS power management, and this project's build environment has
+neither (no `/dev/kvm`, so not even an emulator; checked by hand the same way `tc
+netem`/`xt_statistic` availability gets checked every other phase). **That gate is not
+claimed as passed.** What's below is what could genuinely be verified without one, no more:
+
+- A real Android SDK + NDK + `gomobile` toolchain cross-compiles `core`/`mobile` for
+  `android/arm64` and `android/arm`, and `gomobile bind` produces a real AAR carrying real
+  native libraries (`libgojni.so`) for all four Android ABIs (arm64-v8a, armeabi-v7a, x86,
+  x86_64).
+- `android/app` is a real Gradle/Kotlin project that builds a real, installable debug APK
+  end to end via `./gradlew :app:assembleDebug` — Go core → JNI bindings → Kotlin app, the
+  whole chain, not just individual pieces checked in isolation. `android-app` in CI does the
+  same on every PR, on a real GitHub Actions runner.
+- `core/bond.DialClient` was split into `DialHandshake` + `AttachTUN` (existing callers
+  unaffected — `DialClient` is now just the two called back to back) to solve a real
+  ordering problem Android's `VpnService.Builder` forces: the interface must be built with
+  the relay's dynamically-assigned tunnel IP, which isn't known until *after* the handshake
+  completes, but the Builder can't be reconfigured once `establish()` is called.
+
+**Known gap, honestly stated:** no real device or emulator testing happened here at all —
+not the bonded-throughput comparison, not the screen-off survival window, not even a basic
+"does the VPN permission dialog work and does traffic actually flow" smoke test. That's real
+outstanding work for whoever picks this up with access to an actual phone.
+
 ## Scheduler tiers
 
 Pass `-scheduler <name>` to either binary to pick the tier (default `round-robin`):
@@ -249,4 +284,7 @@ documented tradeoff that Tier 4 exists to fix.
 ## Phase plan
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) §5 for the full table with gates. Short version:
-Phases 0–4 are done and verified. Phase 5 (Android) is next.
+Phases 0–4 are done and verified. Phase 5 (Android) has a real, building app and gomobile
+bridge, but its actual gate (bonded throughput, screen-off survival) needs a real device and
+has not been verified — see "Verified so far (Phase 5)" above. Phase 6 (Desktop) is next
+after that.

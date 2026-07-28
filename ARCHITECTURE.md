@@ -391,3 +391,47 @@ reporting, no account, no default relay logging; reproducible builds.
   a real GitHub Actions runner and measured 74.9 Mbps against the required >80 Mbps (previously
   passing). `testbed/run_phase4.sh` explicitly passes `-fec=true` on every invocation, so its
   own gate is unaffected by the default.
+- **`bond.DialClient` split into `DialHandshake` + `AttachTUN`, for Android.** The Linux CLI
+  client opens its TUN device before ever dialing the relay (`tun.Create` picks the device
+  name; the IP/routes it gets *after* the handshake are applied separately via
+  `tun.ConfigureLinux`), so `DialClient` always had `dev`/`mtu` available up front and just
+  stored them on the `ClientTunnel` for `Run` to use later. Android has no such freedom:
+  `android.net.VpnService.Builder` is immutable once `establish()` is called, and the
+  address it must be built with (`addAddress`) is the relay's dynamically pool-assigned
+  tunnel IP -- which isn't known until *after* the handshake completes. `DialHandshake` does
+  everything `DialClient` did except touch a TUN device, returning a `*ClientTunnel` whose
+  `TunnelIP`/`Prefix`/etc (via the handshake response) the caller can act on immediately;
+  `AttachTUN(dev, mtu)` finishes setup once a real device exists. `DialClient` itself is now
+  just `DialHandshake` + `AttachTUN` called back to back, so this doesn't change behavior for
+  any existing caller -- see `mobile/mobile.go`'s `TunnelBuilder.Handshake` /
+  `Tunnel.AttachTUN` and `android/app`'s `BondifyVpnService.kt` for the real caller.
+- **Android's `mobile` package binds through `bond.PathSpec.Conn`, not
+  `tun.DialUDPViaDevice`.** Choosing which physical network a UDP socket egresses on is
+  `SO_BINDTODEVICE` from Go on Linux, but an unprivileged Android app has no equivalent
+  syscall access -- the only API for it is `ConnectivityManager.Network.bindSocket`,
+  callable from Kotlin/Java only. So unlike every other platform, Android's client doesn't
+  let `core/bond` dial its own path sockets: `BondifyVpnService.kt` requests each physical
+  network, dials+binds+`VpnService.protect()`s a `DatagramSocket` on it itself, and hands
+  the resulting fd to Go via `mobile.TunnelBuilder.AddPathFD`, which adopts it as a
+  `*net.UDPConn` (`net.FileConn`) and passes it through the new `PathSpec.Conn` field --
+  `dialPath` uses it as-is instead of dialing anything. `core/tun/android.go` similarly
+  wraps `golang.zx2c4.com/wireguard/tun`'s `CreateUnmonitoredTUNFromFD` (the same call
+  WireGuard's own Android app uses) to adopt `VpnService.Builder.establish()`'s fd, since an
+  app can't open `/dev/net/tun` directly either.
+- **What phase 5's gate actually needed vs. what this environment could verify.**
+  ARCHITECTURE.md §5's gate is "Wi-Fi+cellular bonded > either alone; 30min screen-off
+  survival" -- both halves require a real Android device with two live physical radios and
+  real OS power management, neither of which exists in this project's build sandbox (no
+  `/dev/kvm`, so not even an emulator; confirmed by hand before writing any Android code,
+  the same kind of check this project has done for `tc netem`/`xt_statistic` availability
+  at every earlier phase). Per this project's own standing rule -- never claim a gate passes
+  from code inspection alone -- that gate is **not claimed as passed** here. What *was* done
+  for real, not just written and assumed correct: a genuine Android SDK + NDK + `gomobile`
+  toolchain was installed and used to cross-compile `core`/`mobile` for `android/arm64` and
+  `android/arm`, bind a real AAR (with real native libraries for all four ABIs) via
+  `gomobile bind`, and build a real, installable debug APK via `./gradlew
+  :app:assembleDebug` end to end -- `android-app` in CI does the same on every PR. That
+  proves the whole chain (Go core → JNI bindings → Kotlin app) is real, correctly wired, and
+  compiles/links/packages without lying about it; it does not and cannot prove the app
+  behaves correctly on a real device, survives Doze, or actually bonds two radios for more
+  throughput than either alone. That verification is real future work, not done here.

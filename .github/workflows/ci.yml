@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25"
           cache: true
       - name: go vet (host arch only)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
@@ -75,10 +75,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
-      - uses: golangci/golangci-lint-action@v6
+          go-version: "1.25"
+      # `version: latest` on golangci-lint-action@v6 resolves to the newest v1.x release
+      # (v1.64.8, the last one ever cut on that line), which is built with go1.24 -- too
+      # old to parse a go.mod targeting go1.25.0 (required by the
+      # golang.org/x/{mobile,mod,net,sync,tools,crypto,sys} versions gomobile bind needs;
+      # see mobile/mobile.go). v6 of the action can't run v2 binaries at all ("golangci-lint
+      # v2 is not supported by golangci-lint-action v6, you must update to
+      # golangci-lint-action v7"), so both the action and the lint version need bumping.
+      - uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          version: v2.12.2
           args: --timeout=5m
 
   test:
@@ -88,9 +95,44 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25"
           cache: true
       - run: go test ./... -race -count=1
+
+  android-app:
+    name: Android app build (gomobile + Gradle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      # GitHub's ubuntu-latest runner images ship the Android SDK and several NDK versions
+      # preinstalled (see actions/runner-images) -- this just makes sure the exact platform,
+      # build-tools, and NDK versions mobile/build_aar.sh needs are present, which is a
+      # no-op download on a runner that already has them cached and a real (if slower) one
+      # otherwise, rather than assuming a specific preinstalled set.
+      - name: Ensure Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+      # mobile/build_aar.sh installs gomobile/gobind itself if missing, then `gomobile bind`
+      # -- both invoked automatically by android/app/build.gradle.kts's generateMobileAar
+      # task, wired into Gradle's preBuild so a plain assembleDebug exercises the whole
+      # chain: Go core -> gomobile-bound AAR -> Kotlin app, the same real chain
+      # verified locally before this workflow was written (see ARCHITECTURE.md §9).
+      - name: gradlew :app:assembleDebug
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --console=plain
 
   netem-gates:
     name: tc netem regression gates
@@ -99,7 +141,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.25"
           cache: true
       - name: Install netem tooling
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 iptables tcpdump iperf3 curl

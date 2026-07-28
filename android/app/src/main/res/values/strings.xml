@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Bondify</string>
+    <string name="notification_channel_name">Bondify tunnel</string>
+    <string name="notification_connected">Bonded and connected</string>
+    <string name="notification_connecting">Connecting…</string>
+    <string name="btn_connect">Connect</string>
+    <string name="btn_disconnect">Disconnect</string>
+    <string name="label_relay_addr">Relay address (host:port)</string>
+    <string name="label_relay_pubkey">Relay public key</string>
+    <string name="label_my_pubkey">Your device key: %1$s</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_error">Error: %1$s</string>
+    <string name="battery_optimization_prompt">For Bondify to stay bonded with the screen off, allow it to ignore battery optimizations.</string>
+    <string name="battery_optimization_action">Allow</string>
+</resources>
