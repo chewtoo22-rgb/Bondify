@@ -54,6 +54,22 @@ func TestACKPathCountersIncludeMeasuredRTT(t *testing.T) {
 	}
 }
 
+func TestACKStateProbeFeedbackUsesDelayedCadence(t *testing.T) {
+	a := newACKState()
+	now := time.Unix(1_700_000_000, 0)
+	a.RequestFeedback(now)
+	if _, ok := a.SnapshotIfDue(now); ok {
+		t.Fatal("probe feedback bypassed delayed-ACK cadence")
+	}
+	s, ok := a.SnapshotIfDue(now.Add(AckMaxDelay))
+	if !ok {
+		t.Fatal("probe feedback was not due after max delay")
+	}
+	if s.payload.HasCumulative || len(s.payload.SACK) != 0 {
+		t.Fatalf("telemetry-only ACK claimed data receipt: %#v", s.payload)
+	}
+}
+
 func TestACKStateCumulativeAndSACK(t *testing.T) {
 	a := newACKState()
 	now := time.Unix(1_700_000_000, 0)
