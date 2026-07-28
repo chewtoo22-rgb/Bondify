@@ -206,3 +206,9 @@ Add concise entries here; link the pull request or commit when available.
   84.694 Mbps homogeneous HoL-aware versus 84.686 Mbps round-robin. Phase 4 measured
   0.04068% loss with FEC, 0.84757% with FEC disabled and retransmission enabled, and
   completed the path-death TCP transfer at 213.715 Mbps.
+- 2026-07-28 - A documentation-only rerun (30409506517) exposed Phase 3 benchmark drift:
+  HoL-aware correctly sent every measured packet on the 100 Mbps fast path with zero
+  Bondify retries, but runner throughput fell from the baseline's 88.604 Mbps to
+  75.093 Mbps during the four intervening benchmark scenarios. The harness now retains
+  its initial sample as a drift signal and takes the acceptance baseline immediately
+  before the HoL sample. The HoL threshold remains unchanged.
