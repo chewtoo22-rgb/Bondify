@@ -213,7 +213,7 @@ The BOND/1 v1 implementation encodes the authenticated ACK body as CBOR with the
 | `has` | bool | Whether a cumulative GSN exists yet. False represents the initial gap before GSN 0. |
 | `cum` | uint64 | Highest contiguously received GSN; meaningful only when `has` is true. |
 | `sack` | array | Up to 32 inclusive `{s, e}` GSN ranges above `cum`. |
-| `paths` | array | `{pid, recv}` received-packet counters for known paths. |
+| `paths` | array | `{pid, recv, rtt}` counters plus optional minimum RTT (µs) for known paths. |
 | `rbuf` | uint32 | Current reorder-buffer occupancy in bytes. |
 | `rms` | uint16 | Current reorder deadline in milliseconds. |
 
@@ -230,7 +230,7 @@ into the original FEC generation.
 
 Senders retain at most 4096 packets / 8 MiB, retransmit at most 64 packets per maintenance
 tick, and abandon a packet after three retries. Timeout retransmission uses twice the
-lowest active path's minimum RTT, clamped to 100 ms–1 s (200 ms while unmeasured), with a
+lowest active path's minimum RTT, clamped to 500 ms–1 s (500 ms while unmeasured), with a
 1 s floor while multiple paths are active so shaped queues do not create a retry
 feedback loop. These bounds are part of the denial-of-service surface and must not be
 removed without replacing them with equally strict accounting.
