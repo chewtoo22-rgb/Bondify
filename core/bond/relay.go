@@ -895,6 +895,7 @@ func (r *Relay) handleACK(oh proto.OuterHeader, ciphertext []byte) {
 	if err := unmarshalCBOR(payload, &ack); err != nil {
 		return
 	}
+	applyACKPathState(ack, sess.pathSlice())
 	sess.rtx.Acknowledge(ack, time.Now())
 	atomic.AddUint64(&sess.Stats.RxAcks, 1)
 	atomic.AddUint64(&r.Stats.RxAcks, 1)
