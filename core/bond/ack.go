@@ -77,11 +77,13 @@ type ackState struct {
 	next     uint64
 	received map[uint64]struct{}
 
-	dirty        bool
-	urgent       bool
-	pending      int
-	firstPending time.Time
-	version      uint64
+	dirty         bool
+	urgent        bool
+	urgentVersion uint64
+	pending       int
+	firstPending  time.Time
+	version       uint64
+	sentVersion   uint64
 
 	lastUrgentNext uint64
 	urgentSent     bool
@@ -122,6 +124,7 @@ func (a *ackState) Observe(gsn uint64, now time.Time) {
 
 	if !a.urgentSent || a.lastUrgentNext != a.next {
 		a.urgent = true
+		a.urgentVersion = a.version
 		a.lastUrgentNext = a.next
 		a.urgentSent = true
 	}
@@ -176,18 +179,37 @@ func (a *ackState) SnapshotIfDue(now time.Time) (ackSnapshot, bool) {
 	return s, true
 }
 
-// MarkSent clears the delayed-ACK state only if no packet arrived while this snapshot was
-// being encrypted/written. If the version moved, the newer receive event remains pending.
-func (a *ackState) MarkSent(version uint64) {
+// MarkSent accounts for every receive event represented by a successfully written
+// snapshot. Packets may arrive on another path while the snapshot is encrypted/written;
+// those newer events remain pending, but the already-reported events must not keep the
+// count above AckEveryPackets and trigger a back-to-back ACK storm.
+func (a *ackState) MarkSent(version uint64, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.version != version {
+	if version <= a.sentVersion {
 		return
 	}
-	a.dirty = false
-	a.urgent = false
-	a.pending = 0
-	a.firstPending = time.Time{}
+	covered := version - a.sentVersion
+	a.sentVersion = version
+	if covered >= uint64(a.pending) {
+		a.pending = 0
+	} else {
+		a.pending -= int(covered)
+	}
+	if a.urgent && a.urgentVersion <= version {
+		a.urgent = false
+	}
+	if a.version == version {
+		a.dirty = false
+		a.pending = 0
+		a.firstPending = time.Time{}
+		return
+	}
+	a.dirty = true
+	if a.pending == 0 {
+		a.pending = 1
+	}
+	a.firstPending = now
 }
 
 type pendingPacket struct {
@@ -447,14 +469,14 @@ func lowestRTTActivePath(paths []*Path) *Path {
 func ackPathCounters(paths []*Path) []AckPathCounter {
 	out := make([]AckPathCounter, 0, len(paths))
 	for _, p := range paths {
-		rttUsec := p.RTTMin() / time.Microsecond
-		if rttUsec > time.Duration(math.MaxUint32) {
-			rttUsec = time.Duration(math.MaxUint32)
+		rttMicros := p.RTTMin() / time.Microsecond
+		if rttMicros > time.Duration(math.MaxUint32) {
+			rttMicros = time.Duration(math.MaxUint32)
 		}
 		out = append(out, AckPathCounter{
 			PathID:   p.id,
 			Received: p.recvPSN.Load(),
-			RTTUsec:  uint32(rttUsec),
+			RTTUsec:  uint32(rttMicros),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PathID < out[j].PathID })
