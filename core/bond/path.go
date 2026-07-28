@@ -67,6 +67,7 @@ type Path struct {
 	srtt                     time.Duration
 	rttVar                   time.Duration
 	rttSamples               []rttSample // pruned to rttWindow, for rtt_min
+	peerRTTMin               time.Duration
 	lossEWMA                 float64
 	consecutiveMissedProbes  int
 	consecutiveHealthyProbes int
@@ -269,13 +270,26 @@ func (p *Path) degrade() {
 
 // RTTMin returns the windowed minimum RTT (over the last 10s), the metric PROTOCOL.md §6
 // mandates for scheduling decisions -- smoothed RTT includes self-induced queueing delay
-// and creates a load-unload oscillation feedback loop; minimum RTT is stable.
+// and creates a load-unload oscillation feedback loop; minimum RTT is stable. A peer-
+// reported value is the fallback for the relay side, which does not yet initiate probes.
 func (p *Path) RTTMin() time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	samples := pruneOld(p.rttSamples, time.Now())
 	p.rttSamples = samples
-	return minRTT(samples)
+	if rtt := minRTT(samples); rtt > 0 {
+		return rtt
+	}
+	return p.peerRTTMin
+}
+
+func (p *Path) SetPeerRTTMin(rtt time.Duration) {
+	if rtt <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.peerRTTMin = rtt
+	p.mu.Unlock()
 }
 
 func (p *Path) Loss() float64 {
