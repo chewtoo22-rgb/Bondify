@@ -202,8 +202,10 @@ The CI runner's real `tc netem` matrix now verifies the required asymmetric case
 On run 30409215021, HoL-aware scheduling delivered 88.90 Mbps against an 88.61 Mbps
 fast-path baseline; on homogeneous paths it delivered 84.69 Mbps against round-robin's
 84.69 Mbps. Per-path counters confirmed the heterogeneous HoL run put all measured data
-on the fast path. The local harness still skips this gate when the host kernel lacks the
-required qdisc modules instead of fabricating a pass.
+on the fast path. The gate takes a fresh fast-only baseline immediately before the
+HoL-aware sample, while retaining an initial sample to reveal hosted-runner drift. The
+local harness still skips this gate when the host kernel lacks the required qdisc modules
+instead of fabricating a pass.
 
 Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link) is not yet
 implemented. BOND/1 ACK/SACK packets and bounded ACK-driven retransmission are implemented
