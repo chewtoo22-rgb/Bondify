@@ -190,6 +190,7 @@ type pendingPacket struct {
 	Retries  int
 	fast     bool
 	sackHits int
+	fastAt   time.Time
 }
 
 // retransmitQueue retains a bounded copy of unacknowledged logical packets.
@@ -236,7 +237,7 @@ func (q *retransmitQueue) enforceBoundsLocked() {
 	}
 }
 
-func (q *retransmitQueue) Acknowledge(ack AckPayload) {
+func (q *retransmitQueue) Acknowledge(ack AckPayload, now time.Time) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -274,7 +275,10 @@ func (q *retransmitQueue) Acknowledge(ack AckPayload) {
 		if gsn < highest {
 			pkt.sackHits++
 			if pkt.sackHits >= RetransmitSACKThreshold {
-				pkt.fast = true
+				if !pkt.fast {
+					pkt.fast = true
+					pkt.fastAt = now
+				}
 			}
 		}
 	}
@@ -316,10 +320,12 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 			continue
 		}
 		delay := rto
+		elapsed := now.Sub(pkt.LastSent)
 		if pkt.fast {
 			delay = RetransmitFastDelay
+			elapsed = now.Sub(pkt.fastAt)
 		}
-		if now.Sub(pkt.LastSent) < delay {
+		if elapsed < delay {
 			continue
 		}
 		if pkt.Retries >= RetransmitMaxRetries {
@@ -330,6 +336,7 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 		pkt.LastSent = now
 		pkt.fast = false
 		pkt.sackHits = 0
+		pkt.fastAt = time.Time{}
 		out = append(out, pendingPacket{
 			GSN:      pkt.GSN,
 			Payload:  append([]byte(nil), pkt.Payload...),
