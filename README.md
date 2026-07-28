@@ -205,9 +205,10 @@ netem` support and exits `0` with a warning rather than fabricate a pass. It's w
 the `netem-gates` CI job, where GitHub Actions' real kernel will execute the real
 capacity-constrained gate.
 
-Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link), real ACK
-packets and real ACK-driven retransmission are not yet implemented — that's Phase 4 scope
-(alongside REDUNDANT mode and adaptive FEC); per-path congestion control landed in Phase 3.
+Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link) is not yet
+implemented. BOND/1 ACK/SACK packets and bounded ACK-driven retransmission are implemented
+on the current development branch alongside REDUNDANT mode and adaptive FEC; see
+`PROJECT_STATUS.md` for the latest CI evidence before treating that work as verified.
 
 ## Verified so far (Phase 4)
 
