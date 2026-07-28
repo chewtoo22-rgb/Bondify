@@ -7,7 +7,8 @@ the account, the telemetry, or the vendor-controlled relay.
 **Status: pre-alpha.** Phases 0–4 have substantial implementations and staged network
 tests. The Phase 5 Android app builds into an APK, but its real-device acceptance gate
 (Wi-Fi+cellular aggregation, path churn, and 30-minute screen-off survival) has not passed.
-ACK-driven retransmission from the original Phase 4 scope is also still missing. See
+Authenticated ACK/SACK feedback and bounded retransmission are implemented and exercised
+under real injected loss in CI. See
 [PROJECT_STATUS.md](PROJECT_STATUS.md) for the live handoff/backlog,
 [ARCHITECTURE.md](ARCHITECTURE.md) for the phase plan, and
 [PROTOCOL.md](PROTOCOL.md) for the wire format. Do not use this yet as your only VPN.
@@ -196,19 +197,17 @@ running relay+client binaries in the two-path netns rig:
   stdout, silently corrupting the `$(run_bonded ...)` throughput captures it shares that
   stream with) before it ever reached CI.
 
-**Known gap, honestly stated:** like Phases 1 and 2, the HoL gate and the Tier 4 vs Tier 1
-hetero/homo benchmark matrix specifically require `tc netem` to hold two paths at genuinely
-different, asymmetric capacities (100Mbps/15ms fast vs 5Mbps/200ms/1%loss slow) -- without
-that split there is no real "slow path" for Tier 4's HoL-avoidance logic to have anything to
-decide about, and `testbed/run_phase3.sh` correctly detects this sandbox's lack of `tc
-netem` support and exits `0` with a warning rather than fabricate a pass. It's wired into
-the `netem-gates` CI job, where GitHub Actions' real kernel will execute the real
-capacity-constrained gate.
+The CI runner's real `tc netem` matrix now verifies the required asymmetric case
+(100Mbps/15ms fast vs 5Mbps/200ms/1% loss slow) and homogeneous 2×50Mbps comparison.
+On run 30409215021, HoL-aware scheduling delivered 88.90 Mbps against an 88.61 Mbps
+fast-path baseline; on homogeneous paths it delivered 84.69 Mbps against round-robin's
+84.69 Mbps. Per-path counters confirmed the heterogeneous HoL run put all measured data
+on the fast path. The local harness still skips this gate when the host kernel lacks the
+required qdisc modules instead of fabricating a pass.
 
 Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link) is not yet
 implemented. BOND/1 ACK/SACK packets and bounded ACK-driven retransmission are implemented
-on the current development branch alongside REDUNDANT mode and adaptive FEC; see
-`PROJECT_STATUS.md` for the latest CI evidence before treating that work as verified.
+alongside REDUNDANT mode and adaptive FEC; see `PROJECT_STATUS.md` for the current limits.
 
 ## Verified so far (Phase 4)
 
@@ -219,12 +218,13 @@ binaries with real, kernel-enforced packet loss (`iptables`'s `xt_statistic` ran
 this sandbox has no `tc netem`/`sch_*` qdisc support at all, confirmed repeatedly, but does
 support this separate loss-injection facility):
 
-- `testbed/run_phase4.sh`'s both sub-gates pass for real, repeatably: sub-gate A (5% real
-  random loss, single path) measured 0.115% and 0.312% application-level goodput loss
-  across two independent runs, both comfortably under the <1% gate; sub-gate B
-  (survivability) killed one of two bonded paths outright 4 seconds into a 12-second TCP
-  transfer and the transfer completed on the surviving path alone (up to 154 Mbps average,
-  zero connection resets).
+- `testbed/run_phase4.sh` has three real gates: adaptive FEC under 5% random loss,
+  FEC-disabled ACK/SACK retransmission under the same loss, and TCP survival when one of
+  two paths dies during a transfer. All three are CI-fatal. Verified runs held
+  application-visible loss below 1% with FEC both enabled and disabled, and completed the
+  path-death transfer on the surviving path without a connection reset. Run 30409215021
+  measured 0.0407% loss with FEC, 0.8476% with FEC disabled and retransmission enabled,
+  and completed the path-death TCP transfer at 213.7 Mbps.
 - REDUNDANT mode verified directly via the live diagnostics endpoint on a real two-path
   run: both paths carried byte-for-byte identical TX counts (duplicated traffic, as
   designed) while `reorder_occupancy_bytes` stayed at 0 and `reorder_forced_releases` at 0
