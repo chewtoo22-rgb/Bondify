@@ -60,6 +60,8 @@ type Path struct {
 	recvPSN atomic.Uint32
 
 	inflight atomic.Int64
+	rttMin   atomic.Int64
+	peerRTT  atomic.Int64
 
 	cc *cc.Controller
 
@@ -67,7 +69,6 @@ type Path struct {
 	srtt                     time.Duration
 	rttVar                   time.Duration
 	rttSamples               []rttSample // pruned to rttWindow, for rtt_min
-	peerRTTMin               time.Duration
 	lossEWMA                 float64
 	consecutiveMissedProbes  int
 	consecutiveHealthyProbes int
@@ -181,6 +182,8 @@ func (p *Path) HandleProbeAck(ack ProbeAckPayload, now time.Time) {
 	}
 	p.rttSamples = append(p.rttSamples, rttSample{at: now, rtt: rtt})
 	p.rttSamples = pruneOld(p.rttSamples, now)
+	currentRTTMin := minRTT(p.rttSamples)
+	p.rttMin.Store(int64(currentRTTMin))
 
 	// Loss: 1 - (delta received / delta sent) since the last probe, per PROTOCOL.md §6.
 	//
@@ -220,7 +223,7 @@ func (p *Path) HandleProbeAck(ack ProbeAckPayload, now time.Time) {
 	if !p.lastProbeAckTime.IsZero() && deltaSent > 0 {
 		deltaBytes := txBytesNow - p.lastProbeAckedTxBytes
 		delivered := int64(float64(deltaBytes) * float64(deltaRecv) / float64(deltaSent))
-		p.cc.Sample(delivered, now.Sub(p.lastProbeAckTime), minRTT(p.rttSamples))
+		p.cc.Sample(delivered, now.Sub(p.lastProbeAckTime), currentRTTMin)
 	}
 	p.lastProbeAckedTxBytes = txBytesNow
 	p.lastProbeAckTime = now
@@ -268,28 +271,24 @@ func (p *Path) degrade() {
 	p.state.Store(int32(sched.StateDegraded))
 }
 
-// RTTMin returns the windowed minimum RTT (over the last 10s), the metric PROTOCOL.md §6
-// mandates for scheduling decisions -- smoothed RTT includes self-induced queueing delay
-// and creates a load-unload oscillation feedback loop; minimum RTT is stable. A peer-
-// reported value is the fallback for the relay side, which does not yet initiate probes.
+// RTTMin returns the cached windowed minimum RTT (over the last 10s), the metric
+// PROTOCOL.md §6 mandates for scheduling decisions -- smoothed RTT includes self-induced
+// queueing delay and creates a load-unload oscillation feedback loop; minimum RTT is
+// stable. HandleProbeAck refreshes the cache at probe cadence so the per-packet scheduler
+// does not lock and rescan the sample window for every packet. A peer-reported value is
+// the fallback for the relay side, which does not yet initiate probes.
 func (p *Path) RTTMin() time.Duration {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	samples := pruneOld(p.rttSamples, time.Now())
-	p.rttSamples = samples
-	if rtt := minRTT(samples); rtt > 0 {
+	if rtt := time.Duration(p.rttMin.Load()); rtt > 0 {
 		return rtt
 	}
-	return p.peerRTTMin
+	return time.Duration(p.peerRTT.Load())
 }
 
 func (p *Path) SetPeerRTTMin(rtt time.Duration) {
 	if rtt <= 0 {
 		return
 	}
-	p.mu.Lock()
-	p.peerRTTMin = rtt
-	p.mu.Unlock()
+	p.peerRTT.Store(int64(rtt))
 }
 
 func (p *Path) Loss() float64 {
