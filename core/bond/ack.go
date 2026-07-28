@@ -81,6 +81,9 @@ type ackState struct {
 	pending      int
 	firstPending time.Time
 	version      uint64
+
+	lastUrgentNext uint64
+	urgentSent     bool
 }
 
 func newACKState() *ackState {
@@ -116,7 +119,11 @@ func (a *ackState) Observe(gsn uint64, now time.Time) {
 		return
 	}
 
-	a.urgent = true
+	if !a.urgentSent || a.lastUrgentNext != a.next {
+		a.urgent = true
+		a.lastUrgentNext = a.next
+		a.urgentSent = true
+	}
 	if gsn-a.next >= AckReceiveWindow {
 		return
 	}
