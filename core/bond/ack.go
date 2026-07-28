@@ -25,7 +25,7 @@ const (
 	RetransmitTick          = 5 * time.Millisecond
 	RetransmitSACKThreshold = 3
 	RetransmitFastDelay     = 10 * time.Millisecond
-	RetransmitMultiDelay    = 250 * time.Millisecond
+	RetransmitMultiDelay    = time.Second
 	RetransmitDefaultRTO    = 200 * time.Millisecond
 	RetransmitMinRTO        = 100 * time.Millisecond
 	RetransmitMaxRTO        = time.Second
@@ -328,7 +328,9 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 		delay := rto
 		elapsed := now.Sub(pkt.LastSent)
 		if pkt.fast {
-			delay = pkt.fastWait
+			if pkt.fastWait < delay {
+				delay = pkt.fastWait
+			}
 			elapsed = now.Sub(pkt.fastAt)
 		}
 		if elapsed < delay {
