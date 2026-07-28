@@ -26,8 +26,12 @@ const (
 	RetransmitSACKThreshold = 3
 	RetransmitFastDelay     = 10 * time.Millisecond
 	RetransmitMultiDelay    = time.Second
-	RetransmitDefaultRTO    = 200 * time.Millisecond
-	RetransmitMinRTO        = 100 * time.Millisecond
+	// SACK supplies the fast path for an observed hole. Keep the fallback timeout
+	// conservative: a 100ms floor turned ordinary ACK lag behind a shaped queue into
+	// thousands of simultaneous retries, which then prolonged the very queue that
+	// triggered them. Tail loss still recovers within this bounded timeout.
+	RetransmitDefaultRTO    = 500 * time.Millisecond
+	RetransmitMinRTO        = 500 * time.Millisecond
 	RetransmitMaxRTO        = time.Second
 	retransmitSemanticFlags = proto.FlagLATENCY |
 		// DUP and FECProtected describe the original physical transmission, not the
