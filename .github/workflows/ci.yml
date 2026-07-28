@@ -128,11 +128,11 @@ jobs:
       # task, wired into Gradle's preBuild so a plain assembleDebug exercises the whole
       # chain: Go core -> gomobile-bound AAR -> Kotlin app, the same real chain
       # verified locally before this workflow was written (see ARCHITECTURE.md §9).
-      - name: gradlew :app:assembleDebug
+      - name: Android unit tests and debug APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --console=plain
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
 
   netem-gates:
     name: tc netem regression gates
@@ -151,3 +151,5 @@ jobs:
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase2.sh
       - name: Run phase 3 gates (HoL gate, Tier 4 vs Tier 1 hetero/homo benchmark matrix)
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase3.sh
+      - name: Run phase 4 gates (real loss, FEC recovery, path-death survivability)
+        run: sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh
