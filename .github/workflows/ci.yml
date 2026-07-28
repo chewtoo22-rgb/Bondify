@@ -76,12 +76,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      # `version: latest` resolves to the newest v1.x release (v1.64.8), which is built
-      # with go1.24 -- too old to parse a go.mod targeting go1.25.0 (required by the
+      # `version: latest` on golangci-lint-action@v6 resolves to the newest v1.x release
+      # (v1.64.8, the last one ever cut on that line), which is built with go1.24 -- too
+      # old to parse a go.mod targeting go1.25.0 (required by the
       # golang.org/x/{mobile,mod,net,sync,tools,crypto,sys} versions gomobile bind needs;
-      # see mobile/mobile.go). Pin an explicit v2 release, built with a current Go
-      # toolchain, instead.
-      - uses: golangci/golangci-lint-action@v6
+      # see mobile/mobile.go). v6 of the action can't run v2 binaries at all ("golangci-lint
+      # v2 is not supported by golangci-lint-action v6, you must update to
+      # golangci-lint-action v7"), so both the action and the lint version need bumping.
+      - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
           args: --timeout=5m
