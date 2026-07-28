@@ -165,6 +165,27 @@ func TestFastRetransmitGraceStartsAtSACKThreshold(t *testing.T) {
 	}
 }
 
+func TestFastRetransmitAllowsMultipathReordering(t *testing.T) {
+	q := newRetransmitQueue()
+	now := time.Unix(1_700_000_000, 0)
+	q.Track(1, []byte{1}, 0, now)
+	ack := AckPayload{
+		SACK:         []AckRange{{Start: 2, End: 2}},
+		PathCounters: []AckPathCounter{{PathID: 0}, {PathID: 1}},
+	}
+	for i := 0; i < RetransmitSACKThreshold; i++ {
+		q.Acknowledge(ack, now)
+	}
+
+	if got := q.Due(now.Add(RetransmitMultiDelay-time.Nanosecond), time.Second); len(got) != 0 {
+		t.Fatalf("multipath retransmit fired inside reorder grace: %#v", got)
+	}
+	got := q.Due(now.Add(RetransmitMultiDelay), time.Second)
+	if len(got) != 1 || got[0].GSN != 1 {
+		t.Fatalf("multipath fast retransmit = %#v, want GSN 1", got)
+	}
+}
+
 func TestRetransmitQueueRetryLimit(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
