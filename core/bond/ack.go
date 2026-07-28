@@ -97,6 +97,21 @@ func newACKState() *ackState {
 	return &ackState{received: make(map[uint64]struct{})}
 }
 
+// RequestFeedback schedules an ACK even when no DATA GSN was received. The client uses
+// this after a probe completes so its measured per-path RTT reaches the non-probing relay
+// before application traffic starts; otherwise the relay must guess how to route the
+// first reverse TCP control packets and can put them on a dramatically slower path.
+func (a *ackState) RequestFeedback(now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.dirty {
+		a.firstPending = now
+	}
+	a.dirty = true
+	a.pending++
+	a.version++
+}
+
 // Observe records a received GSN. A gap makes the next ACK urgent so SACK-driven recovery
 // can beat the reorder deadline. Duplicates still make the ACK dirty: the duplicate often
 // means the sender retransmitted because the previous ACK was lost.
