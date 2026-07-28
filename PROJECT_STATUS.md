@@ -20,14 +20,45 @@ must not cause an incompatible protocol change.
 | Phase 1: one-path tunnel | Linux client, relay, Noise tunnel, NAT | Netns ping/HTTP/encryption/throughput gate | Release-quality installation and external security review |
 | Phase 2: multipath | PATH_ADD, probing, GSN reorder, round robin | Two-path netns runs and CI gate | More churn/flapping coverage |
 | Phase 3: scheduling | Weighted, minRTT+cwnd, HoL-aware schedulers | Unit tests, shaped benchmark gate in CI | Relay-side measurement/pacing remains simplified |
-| Phase 4: resilience | REDUNDANT mode and adaptive Reed-Solomon FEC | CI passes the real-loss FEC and mid-transfer path-death gates | ACK/SACK retransmission from the original specification remains missing |
+| Phase 4: resilience | REDUNDANT mode, adaptive Reed-Solomon FEC, ACK/SACK and bounded retransmission | Existing CI passes FEC and path-death gates; ACK/SACK unit/integration validation is in progress | Do not call complete until the new FEC-off retransmission gate and full CI pass |
 | Phase 5: Android | Kotlin app, VpnService shell, gomobile AAR build | APK compilation in CI | No real-device VPN, bonding, churn, or 30-minute screen-off gate has passed |
 | Phase 6+: product | Specifications only or partial scaffolding | Not verified | Windows app, intelligence, sharing, installer, signed releases |
 
 Do not describe Bondify as production-ready or independently audited. It is a substantial
 pre-alpha networking implementation with important real-device and security work remaining.
 
-## Current stabilization sprint
+## Current protocol sprint
+
+Branch: `agent/ack-sack-retransmission`
+
+### Implemented, awaiting full CI
+
+- Authenticated ACK payloads carry cumulative GSN, up to 32 SACK ranges, per-path receive
+  counters, reorder occupancy, and reorder deadline in both directions.
+- A GSN tracker stays independent of reorder delivery so a deadline-forced release cannot
+  falsely acknowledge a packet that never arrived.
+- Gaps trigger immediate SACK feedback; ordinary ACKs use the specified 8-packet/20 ms
+  delayed-ACK policy and the lowest-RTT ACTIVE path.
+- Senders retain at most 4096 packets / 8 MiB, retry at most three times, and process at
+  most 64 retransmissions per maintenance tick.
+- Fast retransmission waits 10 ms for FEC recovery, while timeout retransmission uses
+  2× minimum RTT clamped to 100 ms–1 s.
+- Retransmissions receive a fresh PSN/AEAD nonce, carry `RTX`, and do not rejoin an old FEC
+  generation.
+- Unit tests cover cumulative/SACK construction, the GSN-0 boundary, delayed-ACK version
+  safety, selective fast retransmit, retry exhaustion, and queue bounds.
+- The Phase 4 harness now has a FEC-disabled 5% loss sub-gate that requires ACK/SACK
+  retransmission alone to keep application-visible UDP loss below 1%.
+
+### Still to verify or extend
+
+- Full Go race/lint/build and Phase 1–4 network CI have not run on this branch yet.
+- ACK path counters are transported but not yet used as the delivery-rate input for the
+  simplified BBR controller.
+- Queue eviction/retry exhaustion are bounded and observable through counters, but a
+  user-facing diagnostic for dropped-unacknowledged packets is still desirable.
+
+## Completed stabilization sprint
 
 Branch: `agent/android-path-lifecycle`
 
@@ -74,9 +105,8 @@ Branch: `agent/android-path-lifecycle`
 
 ### P0 - complete before calling Phase 5 done
 
-1. Implement BOND/1 ACK/SACK packets and bounded retransmission of unacknowledged GSNs,
-   especially when a path dies. The original Phase 4 specification includes this even
-   though REDUNDANT/FEC landed without it.
+1. Verify and harden the in-progress BOND/1 ACK/SACK and bounded retransmission work under
+   real loss, race detection, and all existing regression gates.
 2. Add a safe runtime path API across `core/bond` -> `mobile` -> Kotlin. Handle Android
    `onLost`, network replacement, NAT rebinding, and Wi-Fi/cellular return without killing
    the session.
@@ -148,3 +178,6 @@ Add concise entries here; link the pull request or commit when available.
   GitHub Actions run 30372670159 passed lint, Go race tests, all cross-builds, Android unit
   tests/AAR/debug APK, and every network gate including Phase 4 FEC recovery and TCP
   survival after a path dies.
+- 2026-07-28 - PR #4 squash-merged to `main` at `f02a98f`. ACK/SACK retransmission work
+  started from that verified commit on `agent/ack-sack-retransmission`; implementation and
+  the new FEC-off loss gate are present locally, with CI still pending.
