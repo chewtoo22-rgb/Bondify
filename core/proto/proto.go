@@ -208,3 +208,50 @@ func UnmarshalInner(src []byte) (InnerDataHeader, int, error) {
 
 // HasFlag reports whether flag bit f is set in flags.
 func HasFlag(flags, f uint8) bool { return flags&f != 0 }
+
+// FECHeaderLen is the fixed byte length of FECHeader.
+const FECHeaderLen = 4
+
+// FECHeader precedes the parity shard payload inside an FEC packet's AEAD-encrypted
+// content, immediately after the InnerDataHeader ("Inner IP packet" in the DATA diagram's
+// slot is a parity shard here instead). It carries the two facts a receiver needs to
+// reconstruct a generation that core/fec's Reconstruct doesn't get from the InnerDataHeader
+// already present on every DATA/FEC packet (GenerationID, GenIndex): how many total data
+// shards (N) and parity shards (M) the generation has, and the shard width (W) core/fec's
+// Reed-Solomon math must pad every data shard out to. A receiver that never loses a data
+// shard never needs to parse this at all -- reconstruction, and therefore this header, only
+// matters on the loss path.
+//
+//	 0                   1                   2                   3
+//	 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//	|      N (8)    |      M (8)    |             W (16)           |
+//	+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+type FECHeader struct {
+	N uint8  // total data shards in this generation
+	M uint8  // total parity shards in this generation
+	W uint16 // Reed-Solomon shard width, bytes (core/fec.ShardWidth's return value)
+}
+
+// MarshalFECHeader writes the 4-byte FECHeader. dst must be at least FECHeaderLen bytes.
+func MarshalFECHeader(dst []byte, h FECHeader) error {
+	if len(dst) < FECHeaderLen {
+		return ErrShortBuffer
+	}
+	dst[0] = h.N
+	dst[1] = h.M
+	binary.BigEndian.PutUint16(dst[2:4], h.W)
+	return nil
+}
+
+// UnmarshalFECHeader parses FECHeader from src, returning bytes consumed (FECHeaderLen).
+func UnmarshalFECHeader(src []byte) (FECHeader, int, error) {
+	var h FECHeader
+	if len(src) < FECHeaderLen {
+		return h, 0, ErrShortBuffer
+	}
+	h.N = src[0]
+	h.M = src[1]
+	h.W = binary.BigEndian.Uint16(src[2:4])
+	return h, FECHeaderLen, nil
+}

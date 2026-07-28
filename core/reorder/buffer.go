@@ -32,6 +32,7 @@ const (
 type Buffer struct {
 	mu           sync.Mutex
 	h            gsnHeap
+	inHeap       map[uint64]struct{} // GSNs currently queued in h, for O(1) duplicate detection
 	nextExpected uint64
 	deadline     time.Duration
 	maxBytes     int
@@ -76,6 +77,7 @@ func NewFrom(startGSN uint64, deadline time.Duration, maxBytes int) *Buffer {
 		maxBytes:     maxBytes,
 		out:          make(chan Packet, 1024),
 		nextExpected: startGSN,
+		inHeap:       make(map[uint64]struct{}),
 	}
 	heap.Init(&b.h)
 	return b
@@ -119,7 +121,20 @@ func (b *Buffer) ForcedReleases() uint64 { return b.forcedReleases.Load() }
 // Push inserts a received packet and delivers everything now releasable. Duplicate or
 // already-passed GSNs are dropped silently (this is also where REDUNDANT mode's dedup
 // happens for free at a layer above the AEAD replay window, matching PROTOCOL.md §3.2's
-// note that no additional dedup logic is needed).
+// note that no additional dedup logic is needed) -- both for a GSN already delivered
+// (below nextExpected) and for a GSN that arrived once already but is still sitting
+// buffered, out of order, waiting on an earlier gap (the inHeap set below). The second
+// case is REDUNDANT mode's actual common case: its two copies of one GSN arrive over two
+// independent paths, typically microseconds apart and often before either is drainable,
+// so both land in Push before nextExpected has had any chance to advance past that GSN.
+// Missing this case is a real bug found under real REDUNDANT-mode traffic, not a
+// theoretical one: without it, the second copy pushes a second heap entry with the same
+// GSN. drainLocked only matches an exact head==nextExpected, so once the first copy
+// delivers and nextExpected moves past that GSN, the stale twin is stuck -- it can never
+// drain normally again. It doesn't just sit inertly, though: if it later surfaces as the
+// heap's new minimum (on deadline expiry or overflow), forceReleaseHeadLocked emits it
+// unconditionally, delivering that GSN's payload a *second* time to an already-advanced
+// consumer, on top of holding its bytes in curBytes the whole time it was stuck.
 func (b *Packet) size() int { return len(b.Payload) }
 
 func (b *Buffer) Push(pkt Packet) {
@@ -138,8 +153,13 @@ func (b *Buffer) Push(pkt Packet) {
 		b.mu.Unlock()
 		return // duplicate or already-delivered; drop
 	}
+	if _, buffered := b.inHeap[pkt.GSN]; buffered {
+		b.mu.Unlock()
+		return // already queued (e.g. REDUNDANT mode's other-path copy); drop
+	}
 
 	heap.Push(&b.h, pkt)
+	b.inHeap[pkt.GSN] = struct{}{}
 	b.curBytes += pkt.size()
 
 	b.drainLocked()
@@ -157,6 +177,7 @@ func (b *Buffer) Push(pkt Packet) {
 func (b *Buffer) drainLocked() {
 	for b.h.Len() > 0 && b.h[0].GSN == b.nextExpected {
 		pkt := heap.Pop(&b.h).(Packet)
+		delete(b.inHeap, pkt.GSN)
 		b.curBytes -= pkt.size()
 		b.nextExpected++
 		b.emitLocked(pkt)
@@ -170,6 +191,7 @@ func (b *Buffer) forceReleaseHeadLocked() {
 		return
 	}
 	pkt := heap.Pop(&b.h).(Packet)
+	delete(b.inHeap, pkt.GSN)
 	b.curBytes -= pkt.size()
 	b.nextExpected = pkt.GSN + 1
 	b.forcedReleases.Add(1)

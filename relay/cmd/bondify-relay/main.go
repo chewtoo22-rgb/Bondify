@@ -35,6 +35,8 @@ func main() {
 		keepalive = flag.Int("keepalive", 15, "NAT keepalive interval seconds, pushed to clients")
 		diagAddr  = flag.String("diag-addr", "127.0.0.1:9091", "localhost address to serve live JSON diagnostics on, one entry per connected session (GET /api/v1/diagnostics); empty disables it")
 		scheduler = flag.String("scheduler", "round-robin", "scheduling tier for the relay's own return traffic: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
+		mode      = flag.String("mode", "speed", "sending mode for the relay's own return traffic: speed or redundant")
+		fec       = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on the relay's own return traffic; opt-in since it copies every packet into a generation buffer even at zero loss")
 	)
 	flag.Parse()
 
@@ -80,6 +82,18 @@ func main() {
 		}
 	}
 
+	sendMode, err := bond.ModeFromString(*mode)
+	if err != nil {
+		log.Fatalf("relay: bad -mode: %v", err)
+	}
+	if *fec && sendMode == bond.ModeRedundant {
+		// See the matching check in desktop/cmd/bondify/main.go: sendRedundant never
+		// stamps FlagFECProtected or records into fecSend, so FEC would sit permanently
+		// allocated and inert for the relay's own return traffic too.
+		log.Printf("relay: warning: -fec has no effect in -mode redundant; disabling it")
+		*fec = false
+	}
+
 	r, err := bond.NewRelay(bond.RelayConfig{
 		ListenAddr: *listen,
 		RelayKey:   key,
@@ -88,6 +102,8 @@ func main() {
 		MTU:        *mtu,
 		KeepAlive:  *keepalive,
 		Scheduler:  *scheduler,
+		Mode:       sendMode,
+		FEC:        *fec,
 	}, dev)
 	if err != nil {
 		log.Fatalf("relay: init: %v", err)
@@ -100,6 +116,7 @@ func main() {
 	go func() { errCh <- r.ServeUDP() }()
 	go func() { errCh <- r.ServeTUN() }()
 	go r.ServeReorder(ctx)
+	go r.FECMaintenanceLoop(ctx)
 
 	if *diagAddr != "" {
 		srv, err := diag.NewServer(*diagAddr, func() any { return r.Diagnostics() })

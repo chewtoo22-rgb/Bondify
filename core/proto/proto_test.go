@@ -84,3 +84,30 @@ func TestHeaderOverheadConstant(t *testing.T) {
 		t.Fatalf("HeaderOverhead = %d, want 56", HeaderOverhead)
 	}
 }
+
+func TestFECHeaderRoundTrip(t *testing.T) {
+	h := FECHeader{N: 10, M: 3, W: 1462}
+	buf := make([]byte, FECHeaderLen)
+	if err := MarshalFECHeader(buf, h); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got, n, err := UnmarshalFECHeader(buf)
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if n != FECHeaderLen {
+		t.Fatalf("consumed %d, want %d", n, FECHeaderLen)
+	}
+	if got != h {
+		t.Fatalf("round trip mismatch: got %+v want %+v", got, h)
+	}
+}
+
+func TestFECHeaderShortBuffer(t *testing.T) {
+	if err := MarshalFECHeader(make([]byte, 2), FECHeader{}); err != ErrShortBuffer {
+		t.Fatalf("marshal short buffer error = %v, want ErrShortBuffer", err)
+	}
+	if _, _, err := UnmarshalFECHeader(make([]byte, 2)); err != ErrShortBuffer {
+		t.Fatalf("unmarshal short buffer error = %v, want ErrShortBuffer", err)
+	}
+}

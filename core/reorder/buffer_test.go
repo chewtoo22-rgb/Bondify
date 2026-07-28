@@ -87,6 +87,57 @@ func TestDuplicateDropped(t *testing.T) {
 	}
 }
 
+func TestDuplicateWhileBufferedDropped(t *testing.T) {
+	// Regression test for a real bug found under real REDUNDANT-mode traffic: a duplicate
+	// arriving while the first copy is still buffered (out of order, waiting on a gap --
+	// exactly what happens when the same GSN is sent on two independent paths and both
+	// copies arrive before the gap ahead of them closes) used to create a second heap
+	// entry with the same GSN. drainLocked only matches head==nextExpected, so once the
+	// real copy delivered and nextExpected moved past it, that stale twin could never
+	// drain normally again -- but it wasn't inert: if it later surfaced as the heap's new
+	// minimum (deadline expiry or overflow), forceReleaseHeadLocked delivered it anyway, a
+	// second, spurious copy of an already-delivered GSN. The 30ms wait this test used
+	// against a 50ms deadline was too short to observe that: it passed even with the bug
+	// present, since the stale entry hadn't been force-released yet. Waiting past the
+	// deadline (so a still-present bug's forced release would fire) and asserting zero
+	// occupancy after draining are both needed to actually exercise the failure path.
+	const deadline = 50 * time.Millisecond
+	b := New(deadline, 0)
+	b.Push(Packet{GSN: 3, Payload: []byte{3}}) // out of order (0-2 not yet here); buffered
+	b.Push(Packet{GSN: 3, Payload: []byte{3}}) // duplicate while still buffered
+
+	b.Push(Packet{GSN: 0, Payload: []byte{0}})
+	b.Push(Packet{GSN: 1, Payload: []byte{1}})
+	b.Push(Packet{GSN: 2, Payload: []byte{2}})
+
+	for i := uint64(0); i < 4; i++ {
+		p := recvOne(t, b, time.Second)
+		if p.GSN != i {
+			t.Fatalf("got GSN %d, want %d", p.GSN, i)
+		}
+	}
+	if got := b.Occupancy(); got != 0 {
+		t.Fatalf("buffer retained %d bytes after draining GSNs 0-3; the stale duplicate wasn't dropped", got)
+	}
+	select {
+	case p := <-b.Out():
+		t.Fatalf("unexpected extra delivery of GSN %d; the buffered duplicate should have been dropped, not force-released later", p.GSN)
+	case <-time.After(2 * deadline):
+	}
+}
+
+func TestDuplicateWhileBufferedDoesNotDoubleCountOccupancy(t *testing.T) {
+	b := New(200*time.Millisecond, 0)
+	payload := []byte{1, 2, 3, 4}
+	b.Push(Packet{GSN: 5, Payload: payload}) // out of order; buffered
+	before := b.Occupancy()
+	b.Push(Packet{GSN: 5, Payload: payload}) // duplicate while still buffered
+	after := b.Occupancy()
+	if after != before {
+		t.Fatalf("Occupancy changed from %d to %d on a buffered duplicate; want unchanged", before, after)
+	}
+}
+
 func TestOverflowForceReleases(t *testing.T) {
 	// Buffer sized far below the DefaultBufMin clamp isn't representable, so build a
 	// buffer whose max is the clamped minimum and push enough large packets to force

@@ -35,6 +35,8 @@ func main() {
 		localAddrs  = flag.String("local-addrs", "", "comma-separated local bind IPs, one per uplink/path; append @device to pin a path's egress interface (e.g. 10.60.0.1@wlan0,10.61.0.1@wwan0); omit for a single system-chosen-source path")
 		diagAddr    = flag.String("diag-addr", "127.0.0.1:9090", "localhost address to serve live JSON diagnostics on (GET /api/v1/diagnostics); empty disables it")
 		scheduler   = flag.String("scheduler", "round-robin", "scheduling tier: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
+		mode        = flag.String("mode", "speed", "sending mode: speed (scheduler-picked single path per packet) or redundant (duplicate onto 2 paths)")
+		fec         = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on speed-mode traffic; redundancy scales with observed loss, but even at zero loss still copies every packet into a generation buffer, so it's opt-in rather than a free default")
 	)
 	flag.Parse()
 
@@ -103,12 +105,28 @@ func main() {
 		}
 	}
 
+	sendMode, err := bond.ModeFromString(*mode)
+	if err != nil {
+		log.Fatalf("client: bad -mode: %v", err)
+	}
+	if *fec && sendMode == bond.ModeRedundant {
+		// sendRedundant never stamps FlagFECProtected or records into fecSend (REDUNDANT's
+		// own duplication already provides loss protection), so FEC would sit permanently
+		// allocated and inert -- paying its per-packet generation-buffer copy cost for zero
+		// benefit. Silently reflecting that here, rather than only in a doc comment, keeps
+		// an operator combining both flags from believing FEC is doing anything.
+		log.Printf("client: warning: -fec has no effect in -mode redundant; disabling it")
+		*fec = false
+	}
+
 	t, cfg, err := bond.DialClient(ctx, bond.ClientConfig{
 		RelayAddr:   *relayAddr,
 		RelayPubKey: relayPub,
 		ClientKey:   clientKey,
 		Paths:       paths,
 		Scheduler:   *scheduler,
+		Mode:        sendMode,
+		FEC:         *fec,
 	}, dev, *mtu)
 	if err != nil {
 		log.Fatalf("client: handshake failed: %v", err)

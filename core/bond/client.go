@@ -42,6 +42,15 @@ type ClientConfig struct {
 	// Scheduler selects the scheduling tier (core/sched.New's names: "round-robin",
 	// "weighted-goodput", "min-rtt-cwnd", "hol-aware"). Empty defaults to round-robin.
 	Scheduler string
+	// Mode selects how outgoing packets are sent: ModeSpeed (default, one path per
+	// packet, optionally FEC-protected) or ModeRedundant (duplicated onto DupFactor
+	// distinct paths; FEC is not applied in this mode -- see ARCHITECTURE.md §2.3/README's
+	// "seven laws" on REDUNDANT's data-usage tradeoff).
+	Mode Mode
+	// FEC enables adaptive Reed-Solomon forward error correction (ARCHITECTURE.md §2.3)
+	// on outgoing SPEED-mode traffic. Redundancy scales with observed loss and is zero at
+	// zero loss, so leaving this on costs nothing on a clean path.
+	FEC bool
 }
 
 // DialClient performs the Noise_IK handshake on path 0, then registers any additional
@@ -155,6 +164,11 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 		sched:        scheduler,
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
 		paths:        []*Path{path0},
+		mode:         cfg.Mode,
+	}
+	if cfg.FEC {
+		t.fecSend = newFECSender(t.fecLossEstimate, t.sendFECParity)
+		t.fecRecv = newFECGenBuffer()
 	}
 
 	for i := 1; i < len(paths); i++ {
@@ -267,6 +281,10 @@ type ClientTunnel struct {
 	sched      sched.Scheduler
 	reorderBuf *reorder.Buffer
 
+	mode    Mode
+	fecSend *fecSender    // nil when FEC is disabled
+	fecRecv *fecGenBuffer // nil when FEC is disabled
+
 	pathsMu sync.RWMutex
 	paths   []*Path
 
@@ -316,6 +334,9 @@ func (t *ClientTunnel) Run(ctx context.Context) error {
 
 	go func() { errCh <- t.tunToNet(ctx) }()
 	go func() { errCh <- t.drainReorderToTun(ctx) }()
+	if t.fecSend != nil || t.fecRecv != nil {
+		go t.fecMaintenanceLoop(ctx)
+	}
 	for _, p := range paths {
 		p := p
 		go func() { errCh <- t.pathReadLoop(ctx, p) }()
@@ -362,29 +383,177 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 		}
 		for i := 0; i < n; i++ {
 			payload := bufs[i][tun.IOOffset : tun.IOOffset+sizes[i]]
-			path := t.sched.Next(t.schedPaths(), len(payload))
-			if path == nil {
-				continue // no eligible path right now; drop (queueing is a later refinement)
+			if t.mode == ModeRedundant {
+				t.sendRedundant(payload)
+			} else {
+				t.sendSpeed(payload)
 			}
-			p := path.(*Path)
-			gsn := t.sendGSN.Add(1) - 1
-			psn := p.NextSendPSN()
-			pkt, err := sealPacket(t.sess, proto.TypeData, t.sessionIndex, p.id, proto.InnerDataHeader{
-				GSN:        gsn,
-				PSN:        psn,
-				PathID:     p.id,
-				PayloadLen: uint16(len(payload)),
-			}, payload)
-			if err != nil {
-				return fmt.Errorf("bond: seal data: %w", err)
-			}
-			if _, err := p.conn.Write(pkt); err != nil {
-				continue // this path's socket errored; let its read loop notice and report
-			}
-			atomic.AddUint64(&t.Stats.TxPackets, 1)
-			atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
-			atomic.AddUint64(&p.Stats.TxPackets, 1)
-			atomic.AddUint64(&p.Stats.TxBytes, uint64(len(payload)))
+		}
+	}
+}
+
+// sendSpeed sends payload on the scheduler's chosen single path, stamping FEC generation
+// info and FlagFECProtected when FEC is enabled.
+func (t *ClientTunnel) sendSpeed(payload []byte) {
+	path := t.sched.Next(t.schedPaths(), len(payload))
+	if path == nil {
+		return // no eligible path right now; drop (queueing is a later refinement)
+	}
+	p := path.(*Path)
+	gsn := t.sendGSN.Add(1) - 1
+	psn := p.NextSendPSN()
+
+	header := proto.InnerDataHeader{
+		GSN:        gsn,
+		PSN:        psn,
+		PathID:     p.id,
+		PayloadLen: uint16(len(payload)),
+	}
+	var fecGenID uint16
+	var fecGenIndex int
+	var fecInner []byte
+	if t.fecSend != nil {
+		fecGenID, fecGenIndex = t.fecSend.NextSlot()
+		header.GenerationID = fecGenID
+		header.GenIndex = uint8(fecGenIndex)
+		header.Flags |= proto.FlagFECProtected
+		buf := make([]byte, proto.InnerHeaderLen+len(payload))
+		if err := proto.MarshalInner(buf, header); err == nil {
+			copy(buf[proto.InnerHeaderLen:], payload)
+			fecInner = buf
+		}
+	}
+
+	pkt, err := sealPacket(t.sess, proto.TypeData, t.sessionIndex, p.id, header, payload)
+	if err != nil {
+		return
+	}
+	if _, err := p.conn.Write(pkt); err != nil {
+		return // this path's socket errored; let its read loop notice and report
+	}
+	atomic.AddUint64(&t.Stats.TxPackets, 1)
+	atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
+	atomic.AddUint64(&p.Stats.TxPackets, 1)
+	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(payload)))
+
+	// Record (and, on the fec.K-th packet, close and emit parity for) this generation only
+	// after the packet itself is actually on the wire. Doing it earlier let the Kth
+	// packet's own parity reach the receiver before the Kth packet itself did, making the
+	// receiver treat an in-flight-but-not-yet-arrived packet as "missing" and spend one of
+	// the generation's real reconstruction slots recovering it needlessly -- robbing
+	// capacity from an actual loss elsewhere in the same generation. Found for real: the
+	// phase 4 gate measured far higher residual loss than FEC's own math predicted for its
+	// configured redundancy, until this fix.
+	if fecInner != nil {
+		t.fecSend.Record(fecGenID, fecGenIndex, fecInner)
+	}
+}
+
+// sendRedundant duplicates payload, under one shared GSN, onto up to DupFactor distinct
+// healthy paths (PROTOCOL.md's DUP_FACTOR). The reorder buffer's existing
+// GSN<nextExpected check dedups the extra copies at the receiver for free -- see
+// PROTOCOL.md §3's note that replay protection doubles as REDUNDANT-mode dedup.
+func (t *ClientTunnel) sendRedundant(payload []byte) {
+	paths := selectRedundantPaths(t.Paths(), DupFactor)
+	if len(paths) == 0 {
+		return
+	}
+	gsn := t.sendGSN.Add(1) - 1
+	for i, p := range paths {
+		psn := p.NextSendPSN()
+		var flags uint8
+		if i > 0 {
+			flags |= proto.FlagDUP
+		}
+		pkt, err := sealPacket(t.sess, proto.TypeData, t.sessionIndex, p.id, proto.InnerDataHeader{
+			GSN:        gsn,
+			PSN:        psn,
+			PathID:     p.id,
+			Flags:      flags,
+			PayloadLen: uint16(len(payload)),
+		}, payload)
+		if err != nil {
+			continue
+		}
+		if _, err := p.conn.Write(pkt); err != nil {
+			continue
+		}
+		atomic.AddUint64(&p.Stats.TxPackets, 1)
+		atomic.AddUint64(&p.Stats.TxBytes, uint64(len(payload)))
+	}
+	// Tunnel-wide Stats count the logical packet once, not once per duplicate: it
+	// represents one user packet sent, matching how Stats.RxPackets counts an arrival
+	// once regardless of how many duplicate copies the receiver's dedup discarded.
+	atomic.AddUint64(&t.Stats.TxPackets, 1)
+	atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
+}
+
+// fecLossEstimate is the redundancy input for FEC generations closing on this tunnel: the
+// maximum Loss() among ACTIVE+BOND paths. Max, not average or min, because SPEED mode's
+// scheduler may route a generation's packets across several paths, and the generation
+// needs enough parity to survive whichever of those paths is worst right now.
+func (t *ClientTunnel) fecLossEstimate() float64 {
+	var maxLoss float64
+	for _, p := range t.Paths() {
+		if p.State() != sched.StateActive || p.Role() != sched.RoleBond {
+			continue
+		}
+		if l := p.Loss(); l > maxLoss {
+			maxLoss = l
+		}
+	}
+	return maxLoss
+}
+
+// sendFECParity seals and sends one parity shard on the healthiest currently ACTIVE+BOND
+// path (ARCHITECTURE.md §2.3: "Parity goes on the least loaded path, never the lossy
+// one"). A generation with no eligible path to carry parity simply loses that
+// generation's FEC protection -- the data packets it protects were already sent on their
+// own regardless, so this never blocks the data plane.
+func (t *ClientTunnel) sendFECParity(genID uint16, genIndex, n, m, w int, shard []byte) {
+	p := healthiestPath(t.Paths())
+	if p == nil {
+		return
+	}
+	fecPayload := make([]byte, proto.FECHeaderLen+len(shard))
+	if err := proto.MarshalFECHeader(fecPayload, proto.FECHeader{N: uint8(n), M: uint8(m), W: uint16(w)}); err != nil {
+		return
+	}
+	copy(fecPayload[proto.FECHeaderLen:], shard)
+
+	psn := p.NextSendPSN()
+	pkt, err := sealPacket(t.sess, proto.TypeFEC, t.sessionIndex, p.id, proto.InnerDataHeader{
+		PSN:          psn,
+		PathID:       p.id,
+		PayloadLen:   uint16(len(fecPayload)),
+		GenerationID: genID,
+		GenIndex:     uint8(genIndex),
+	}, fecPayload)
+	if err != nil {
+		return
+	}
+	if _, err := p.conn.Write(pkt); err != nil {
+		return // this path's socket errored; let its read loop notice and report
+	}
+}
+
+// fecMaintenanceLoop periodically flushes a partial send-side generation that never
+// reached fec.K packets (so it still closes within FECGenTimeout on a quiet tunnel) and
+// evicts stale receive-side generation state. Only started when FEC is enabled.
+func (t *ClientTunnel) fecMaintenanceLoop(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if t.fecSend != nil {
+			t.fecSend.Flush(FECGenTimeout)
+		}
+		if t.fecRecv != nil {
+			t.fecRecv.GC(time.Second)
 		}
 	}
 }
@@ -419,6 +588,39 @@ func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
 			atomic.AddUint64(&p.Stats.RxBytes, uint64(len(payload)))
 			cp := append([]byte(nil), payload...)
 			t.reorderBuf.Push(reorder.Packet{GSN: inner.GSN, Payload: cp, Push: proto.HasFlag(inner.Flags, proto.FlagPUSH)})
+			if t.fecRecv != nil && proto.HasFlag(inner.Flags, proto.FlagFECProtected) {
+				plain := make([]byte, proto.InnerHeaderLen+len(payload))
+				if err := proto.MarshalInner(plain, inner); err == nil {
+					copy(plain[proto.InnerHeaderLen:], payload)
+					t.fecRecv.HandleData(inner.GenerationID, int(inner.GenIndex), plain)
+				}
+			}
+		case proto.TypeFEC:
+			inner, payload, err := openPacket(t.sess, oh, p.id, buf[consumed:n])
+			if err != nil {
+				atomic.AddUint64(&t.Stats.RxErrors, 1)
+				continue
+			}
+			p.RecordRecv() // FEC packets consume PSN on send too; keep loss accounting consistent
+			if t.fecRecv == nil {
+				continue // FEC disabled locally; nothing to do with an unsolicited parity packet
+			}
+			fh, fhLen, err := proto.UnmarshalFECHeader(payload)
+			if err != nil {
+				continue
+			}
+			shard := payload[fhLen:]
+			parityIndex := int(inner.GenIndex) - int(fh.N)
+			recovered := t.fecRecv.HandleFEC(inner.GenerationID, int(fh.N), int(fh.M), int(fh.W), parityIndex, shard)
+			for _, plain := range recovered {
+				h, rpayload, ok := unmarshalRecovered(plain)
+				if !ok {
+					continue
+				}
+				atomic.AddUint64(&t.Stats.RxPackets, 1)
+				atomic.AddUint64(&t.Stats.RxBytes, uint64(len(rpayload)))
+				t.reorderBuf.Push(reorder.Packet{GSN: h.GSN, Payload: rpayload, Push: proto.HasFlag(h.Flags, proto.FlagPUSH)})
+			}
 		case proto.TypeProbeAck:
 			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
 			if err != nil {
