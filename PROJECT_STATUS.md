@@ -48,7 +48,8 @@ Branch: `agent/android-path-lifecycle`
 - Connection errors remain visible as `Failed` instead of being immediately overwritten by
   `Disconnected`.
 - The incorrect claim that the Android service already owns a wake lock was removed.
-- Phase 4's real-loss/FEC/path-death test script is being added to CI.
+- Phase 4's real-loss/FEC/path-death test script is now in CI. Its first CI execution on
+  PR #4 failed, proving the previous manual pass was not yet a reliable continuous gate.
 
 ### Still not fixed by this sprint
 
@@ -130,4 +131,9 @@ Add concise entries here; link the pull request or commit when available.
 - 2026-07-28 - Baseline repository inspection: latest Phase 5 CI run was green, but its
   Android evidence was build-only. Real-device Phase 5 remains open.
 - 2026-07-28 - Android lifecycle stabilization started on
-  `agent/android-path-lifecycle`; validation and PR link pending.
+  `agent/android-path-lifecycle`; draft PR:
+  https://github.com/chewtoo22-rgb/Bondify/pull/4
+- 2026-07-28 - PR #4 CI: lint, Go race tests, all cross-builds, Android endpoint unit
+  tests, gomobile AAR, and debug APK succeeded. Network Phases 1-3 succeeded. The newly
+  enabled Phase 4 real-loss/FEC/path-death step failed. Root cause is not recorded yet;
+  inspect the failing job log before changing the implementation or relaxing the gate.
