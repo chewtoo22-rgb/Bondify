@@ -186,6 +186,20 @@ func TestFastRetransmitAllowsMultipathReordering(t *testing.T) {
 	}
 }
 
+func TestRetransmitRTOMultipathFloor(t *testing.T) {
+	one := NewPath(0, nil)
+	one.SetActive()
+	if got := retransmitRTO([]*Path{one}); got != RetransmitDefaultRTO {
+		t.Fatalf("unmeasured single-path RTO = %s, want %s", got, RetransmitDefaultRTO)
+	}
+
+	two := NewPath(1, nil)
+	two.SetActive()
+	if got := retransmitRTO([]*Path{one, two}); got != RetransmitMultiDelay {
+		t.Fatalf("unmeasured multipath RTO = %s, want %s", got, RetransmitMultiDelay)
+	}
+}
+
 func TestRetransmitQueueRetryLimit(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
