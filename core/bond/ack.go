@@ -23,6 +23,7 @@ const (
 	RetransmitMaxRetries    = 3
 	RetransmitMaxBatch      = 64
 	RetransmitTick          = 5 * time.Millisecond
+	RetransmitSACKThreshold = 3
 	RetransmitFastDelay     = 10 * time.Millisecond
 	RetransmitDefaultRTO    = 200 * time.Millisecond
 	RetransmitMinRTO        = 100 * time.Millisecond
@@ -188,6 +189,7 @@ type pendingPacket struct {
 	LastSent time.Time
 	Retries  int
 	fast     bool
+	sackHits int
 }
 
 // retransmitQueue retains a bounded copy of unacknowledged logical packets.
@@ -270,7 +272,10 @@ func (q *retransmitQueue) Acknowledge(ack AckPayload) {
 	// chance to repair it first.
 	for gsn, pkt := range q.packets {
 		if gsn < highest {
-			pkt.fast = true
+			pkt.sackHits++
+			if pkt.sackHits >= RetransmitSACKThreshold {
+				pkt.fast = true
+			}
 		}
 	}
 }
@@ -324,6 +329,7 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 		pkt.Retries++
 		pkt.LastSent = now
 		pkt.fast = false
+		pkt.sackHits = 0
 		out = append(out, pendingPacket{
 			GSN:      pkt.GSN,
 			Payload:  append([]byte(nil), pkt.Payload...),
