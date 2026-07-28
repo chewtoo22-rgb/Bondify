@@ -208,6 +208,36 @@ Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link), r
 packets and real ACK-driven retransmission are not yet implemented — that's Phase 4 scope
 (alongside REDUNDANT mode and adaptive FEC); per-path congestion control landed in Phase 3.
 
+## Verified so far (Phase 4)
+
+REDUNDANT mode and adaptive Reed-Solomon FEC (`core/fec`, wired into `core/bond`), unit-
+tested (`core/fec`, `core/bond`'s FEC/mode files, and `core/reorder`'s new duplicate-while-
+buffered tests, all passing under `-race`) and run against real running relay+client
+binaries with real, kernel-enforced packet loss (`iptables`'s `xt_statistic` random match —
+this sandbox has no `tc netem`/`sch_*` qdisc support at all, confirmed repeatedly, but does
+support this separate loss-injection facility):
+
+- `testbed/run_phase4.sh`'s both sub-gates pass for real, repeatably: sub-gate A (5% real
+  random loss, single path) measured 0.115% and 0.312% application-level goodput loss
+  across two independent runs, both comfortably under the <1% gate; sub-gate B
+  (survivability) killed one of two bonded paths outright 4 seconds into a 12-second TCP
+  transfer and the transfer completed on the surviving path alone (up to 154 Mbps average,
+  zero connection resets).
+- REDUNDANT mode verified directly via the live diagnostics endpoint on a real two-path
+  run: both paths carried byte-for-byte identical TX counts (duplicated traffic, as
+  designed) while `reorder_occupancy_bytes` stayed at 0 and `reorder_forced_releases` at 0
+  throughout a 421 Mbps TCP transfer — the dedup "for free" via the reorder buffer's
+  GSN-already-seen check worked with zero backlog or forced releases.
+- Two real bugs were found and fixed under this real load-testing, not code inspection —
+  see ARCHITECTURE.md §9 for the full writeup of both: a reorder-buffer duplicate-delivery
+  bug that only REDUNDANT mode's legitimate same-GSN-on-two-paths traffic could expose, and
+  a test-harness loss-injection bug (`iptables` `OUTPUT`-chain drops on the client's own
+  connected UDP socket return a synchronous `EPERM` to `write()`, unlike real WAN loss,
+  which silently hid dropped packets from FEC entirely) that took real, careful
+  cross-checking of `tcpdump` captures against application-level packet counters to isolate
+  — the actual FEC math was correct throughout; the loss it was being tested against wasn't
+  reaching it the way real loss would.
+
 ## Scheduler tiers
 
 Pass `-scheduler <name>` to either binary to pick the tier (default `round-robin`):
@@ -219,4 +249,4 @@ documented tradeoff that Tier 4 exists to fix.
 ## Phase plan
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) §5 for the full table with gates. Short version:
-Phases 0–3 are done and verified. Phase 4 (REDUNDANT mode + adaptive FEC) is next.
+Phases 0–4 are done and verified. Phase 5 (Android) is next.

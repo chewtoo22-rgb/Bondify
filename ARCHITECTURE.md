@@ -321,3 +321,58 @@ reporting, no account, no default relay logging; reproducible builds.
   without them (`TestHoLAwareSharesLoadAcrossEquallyFastPaths`,
   `TestHoLAwareBothPathsUnmeasuredRTT`, and their Tier 3 equivalents) and were re-verified
   against real running relay+client binaries in the netns rig after the fix.
+- **Fixed a real duplicate-delivery bug in the reorder buffer, found by REDUNDANT mode.**
+  `Buffer.Push`'s duplicate check only compared an arriving GSN against `nextExpected`,
+  which is sufficient when every GSN can only ever arrive once (SPEED mode: AEAD's per-path
+  replay window already rejects true wire replays before a packet reaches the buffer at
+  all). REDUNDANT mode legitimately delivers the *same* GSN twice, on two different paths,
+  and a second copy arriving while the first is still buffered (out of order, waiting on an
+  earlier gap) fell through the `nextExpected` check and created a second heap entry with an
+  identical GSN. That entry could never drain normally and, if it became the heap's new
+  minimum, drove `nextExpected` backwards — corrupting delivery order for everything after
+  it. Fixed by tracking an explicit `inHeap` set alongside the heap so a GSN already
+  buffered is dropped on arrival, not just a GSN already delivered. See
+  `core/reorder/buffer.go`'s `Push` doc comment and `TestDuplicateWhileBufferedDropped`.
+  Verified for real: before the fix, a two-path REDUNDANT-mode `iperf3` run stalled
+  completely (timeout, zero throughput); after it, 429.7 Mbps with
+  `reorder_occupancy_bytes=0` and matching TX counts on both paths.
+- **The Phase 4 FEC gate's real loss injection had to move from the client's OUTPUT chain
+  to the relay's INPUT chain — a test-methodology bug, not a FEC bug, but one that cost a
+  long debugging session before it was found.** The gate originally injected loss with
+  `iptables -A OUTPUT ... -j DROP` on the *client's own* outbound chain, matching its
+  encapsulated UDP packets to the relay. On this project's kernel, a `DROP` verdict in a
+  *local* `OUTPUT` chain is delivered synchronously back to the owning connected UDP
+  socket's `write()` call as an immediate `EPERM` — confirmed by hand with a minimal
+  Go program doing nothing but `net.Dial("udp", ...)` + repeated `Write()` against the same
+  topology, no Bondify code involved. Real WAN loss never gives the sender any such signal:
+  `write()` succeeds and the packet just never arrives. `ClientTunnel.sendSpeed` (correctly,
+  given the actual contract of a failed write) returns on a write error *before* calling
+  `fecSend.Record`, so a packet dropped this way never even enters a FEC generation — FEC
+  had zero chance to protect it, and the measured "post-FEC" loss came out roughly equal to
+  the raw injected rate no matter how much redundancy was configured. This was diagnosed by
+  instrumenting the full send/receive path end to end (temporary, since-removed debug
+  logging) and cross-checking `tcpdump` captures against the client's and relay's own
+  packet counters at each stage, which showed real DATA-level loss was near zero even
+  though iptables was demonstrably dropping ~5% of matching packets — the drops were
+  synchronous local rejections the application had already excluded from its own
+  bookkeeping. Moving the same `-m statistic --mode random --probability 0.05 -j DROP` rule
+  to the *relay's* `INPUT` chain instead (`testbed/run_phase4.sh`) reproduces real loss
+  faithfully: the client's `write()` always succeeds, the packet is genuinely recorded for
+  FEC, and it simply never arrives. With that fix alone, FEC recovery went from
+  indistinguishable-from-off to genuinely reducing 5% wire loss to roughly 1.5% goodput
+  loss — still short of the gate.
+- **`fec.LossScale` raised from 2.5 to 5.0 to close the remaining gap to the gate.** Once
+  loss injection was fixed (above), 5% real loss with the original scale produced `m=2`
+  parity shards per `K=10`-packet generation, saturating `FEC_MAX_REDUNDANCY` only at 10%+
+  mean loss as originally documented. But a generation is only 10 packets, so the *number*
+  of losses in any single generation is binomially distributed around that 5% mean, not
+  constant: at `m=2`, roughly 1.16% of generations statistically lose 3 or more of their 10
+  packets and go unrecovered — measured for real at 1.31%–1.59% goodput loss across
+  repeated runs, consistent with that math and above the gate's <1% bar.
+  `FEC_MAX_REDUNDANCY=0.25` is a hard PROTOCOL.md constant and wasn't touched; `LossScale`
+  is not spec-mandated (only `FEC_K` and `FEC_MAX_REDUNDANCY` are, per the Appendix), so it
+  was retuned to saturate the existing 0.25 cap at 5% mean loss instead of 10%, giving
+  `m=3` at the gate's own test condition. The same binomial math at `m=3` predicts ~0.11%
+  unrecovered, which is what repeated real runs now show (0.115%, 0.312%) — comfortably
+  under 1%, with real headroom rather than a coin-flip pass. See `core/fec/fec.go`'s
+  `LossScale` doc comment.
