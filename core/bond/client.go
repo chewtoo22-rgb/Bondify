@@ -645,7 +645,7 @@ func (t *ClientTunnel) sendACKIfDue(now time.Time) {
 	if _, err := p.conn.Write(pkt); err != nil {
 		return
 	}
-	t.ack.MarkSent(snapshot.version)
+	t.ack.MarkSent(snapshot.version, time.Now())
 	atomic.AddUint64(&t.Stats.TxAcks, 1)
 }
 
