@@ -495,7 +495,7 @@ func (r *Relay) sendACKIfDue(sess *relaySession, now time.Time) {
 	if _, err := r.conn.WriteToUDP(pkt, addr); err != nil {
 		return
 	}
-	sess.ack.MarkSent(snapshot.version)
+	sess.ack.MarkSent(snapshot.version, time.Now())
 	atomic.AddUint64(&sess.Stats.TxAcks, 1)
 	atomic.AddUint64(&r.Stats.TxAcks, 1)
 }
