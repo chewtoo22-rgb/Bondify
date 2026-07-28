@@ -110,6 +110,9 @@ run_bonded() {
 	if [ -n "$final_stats" ]; then
 		log "$label counters: $final_stats"
 	fi
+	grep 'client:   path' "$LOG-client-$label.log" | tail -"$want_paths" | while IFS= read -r path_stats; do
+		log "$label counters: $path_stats"
+	done
 
 	kill "$RELAY_PID" "$CLIENT_PID" "$IPERF_PID" 2>/dev/null || true
 	wait "$RELAY_PID" "$CLIENT_PID" "$IPERF_PID" 2>/dev/null || true
