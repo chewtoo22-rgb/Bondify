@@ -217,7 +217,9 @@ The BOND/1 v1 implementation encodes the authenticated ACK body as CBOR with the
 | `rbuf` | uint32 | Current reorder-buffer occupancy in bytes. |
 | `rms` | uint16 | Current reorder deadline in milliseconds. |
 
-Detecting a gap sends an ACK immediately rather than waiting for the delayed-ACK limit.
+The first observation of a new cumulative gap sends an ACK immediately rather than waiting
+for the delayed-ACK limit. Further packets above that same gap use the normal 8-packet /
+20 ms cadence, preventing an expected slow multipath packet from creating an ACK storm.
 An unacknowledged GSN becomes eligible for fast retransmission after three ACKs report a
 SACKed successor, preventing ordinary reordering from being mistaken for loss. The grace
 period is 10 ms for a single-path session and 1 s when ACK path counters report multiple
