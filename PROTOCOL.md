@@ -206,6 +206,29 @@ Derived per path:
 
 ACKs are sent on the **lowest-RTT ACTIVE path**, not on the path data arrived on. ACK loss is far more damaging than data loss; give ACKs the best path. Send an ACK every 8 received data packets or every 20 ms, whichever comes first.
 
+The BOND/1 v1 implementation encodes the authenticated ACK body as CBOR with these keys:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `has` | bool | Whether a cumulative GSN exists yet. False represents the initial gap before GSN 0. |
+| `cum` | uint64 | Highest contiguously received GSN; meaningful only when `has` is true. |
+| `sack` | array | Up to 32 inclusive `{s, e}` GSN ranges above `cum`. |
+| `paths` | array | `{pid, recv}` received-packet counters for known paths. |
+| `rbuf` | uint32 | Current reorder-buffer occupancy in bytes. |
+| `rms` | uint16 | Current reorder deadline in milliseconds. |
+
+Detecting a gap sends an ACK immediately rather than waiting for the delayed-ACK limit.
+An unacknowledged GSN below a SACKed successor becomes eligible for fast retransmission
+after a short 10 ms grace period so an in-flight FEC shard can repair it first. Every
+retransmission uses a fresh path PSN and AEAD nonce and sets `RTX`; it is not inserted back
+into the original FEC generation.
+
+Senders retain at most 4096 packets / 8 MiB, retransmit at most 64 packets per maintenance
+tick, and abandon a packet after three retries. Timeout retransmission uses twice the
+lowest active path's minimum RTT, clamped to 100 ms–1 s (200 ms while unmeasured). These
+bounds are part of the denial-of-service surface and must not be removed without replacing
+them with equally strict accounting.
+
 ## 8. Transport fallbacks
 
 The same BOND/1 framing is carried over three transports, selected per path and switchable at runtime without dropping the session:
