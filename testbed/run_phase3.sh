@@ -105,6 +105,12 @@ run_bonded() {
 		cat "$LOG-iperf-$label.err" >&2
 	fi
 
+	local final_stats
+	final_stats=$(grep 'client: tx=' "$LOG-client-$label.log" | tail -1 || true)
+	if [ -n "$final_stats" ]; then
+		log "$label counters: $final_stats"
+	fi
+
 	kill "$RELAY_PID" "$CLIENT_PID" "$IPERF_PID" 2>/dev/null || true
 	wait "$RELAY_PID" "$CLIENT_PID" "$IPERF_PID" 2>/dev/null || true
 	RELAY_PID=""; CLIENT_PID=""; IPERF_PID=""
