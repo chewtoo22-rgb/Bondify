@@ -25,7 +25,7 @@ const (
 	RetransmitTick          = 5 * time.Millisecond
 	RetransmitSACKThreshold = 3
 	RetransmitFastDelay     = 10 * time.Millisecond
-	RetransmitMultiDelay    = 50 * time.Millisecond
+	RetransmitMultiDelay    = 250 * time.Millisecond
 	RetransmitDefaultRTO    = 200 * time.Millisecond
 	RetransmitMinRTO        = 100 * time.Millisecond
 	RetransmitMaxRTO        = time.Second
@@ -385,16 +385,32 @@ func (q *retransmitQueue) compactOrderLocked() {
 func retransmitRTO(paths []*Path) time.Duration {
 	p := lowestRTTActivePath(paths)
 	if p == nil || p.RTTMin() <= 0 {
+		if activePathCount(paths) > 1 {
+			return RetransmitMultiDelay
+		}
 		return RetransmitDefaultRTO
 	}
 	rto := 2 * p.RTTMin()
 	if rto < RetransmitMinRTO {
-		return RetransmitMinRTO
+		rto = RetransmitMinRTO
 	}
 	if rto > RetransmitMaxRTO {
 		return RetransmitMaxRTO
 	}
+	if activePathCount(paths) > 1 && rto < RetransmitMultiDelay {
+		return RetransmitMultiDelay
+	}
 	return rto
+}
+
+func activePathCount(paths []*Path) int {
+	n := 0
+	for _, p := range paths {
+		if p.State() == sched.StateActive && p.Role() != sched.RoleDisabled {
+			n++
+		}
+	}
+	return n
 }
 
 // lowestRTTActivePath is used for ACKs and retransmissions. Unlike normal data scheduling,
