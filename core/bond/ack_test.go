@@ -1,0 +1,182 @@
+package bond
+
+import (
+	"reflect"
+	"testing"
+	"time"
+)
+
+func TestACKPayloadCBORRoundTrip(t *testing.T) {
+	want := AckPayload{
+		HasCumulative:   true,
+		CumulativeGSN:   8,
+		SACK:            []AckRange{{Start: 10, End: 12}, {Start: 15, End: 15}},
+		PathCounters:    []AckPathCounter{{PathID: 0, Received: 40}, {PathID: 2, Received: 9}},
+		ReorderBytes:    1234,
+		ReorderDeadline: 20,
+	}
+	wire, err := marshalCBOR(want)
+	if err != nil {
+		t.Fatalf("marshal ACK: %v", err)
+	}
+	var got AckPayload
+	if err := unmarshalCBOR(wire, &got); err != nil {
+		t.Fatalf("unmarshal ACK: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ACK round trip = %#v, want %#v", got, want)
+	}
+}
+
+func TestACKStateCumulativeAndSACK(t *testing.T) {
+	a := newACKState()
+	now := time.Unix(1_700_000_000, 0)
+
+	a.Observe(0, now)
+	a.Observe(2, now)
+	a.Observe(3, now)
+	a.Observe(5, now)
+
+	s, ok := a.SnapshotIfDue(now)
+	if !ok {
+		t.Fatal("gap should make ACK immediately due")
+	}
+	if !s.payload.HasCumulative || s.payload.CumulativeGSN != 0 {
+		t.Fatalf("cumulative = (%v, %d), want (true, 0)", s.payload.HasCumulative, s.payload.CumulativeGSN)
+	}
+	want := []AckRange{{Start: 2, End: 3}, {Start: 5, End: 5}}
+	if len(s.payload.SACK) != len(want) {
+		t.Fatalf("SACK ranges = %#v, want %#v", s.payload.SACK, want)
+	}
+	for i := range want {
+		if s.payload.SACK[i] != want[i] {
+			t.Fatalf("SACK[%d] = %#v, want %#v", i, s.payload.SACK[i], want[i])
+		}
+	}
+
+	a.Observe(1, now)
+	s, ok = a.SnapshotIfDue(now)
+	if !ok || s.payload.CumulativeGSN != 3 {
+		t.Fatalf("after filling gap cumulative = (%v, %d), want (true, 3)", ok, s.payload.CumulativeGSN)
+	}
+}
+
+func TestACKStateCapsSACKRanges(t *testing.T) {
+	a := newACKState()
+	now := time.Unix(1_700_000_000, 0)
+	for gsn := uint64(1); gsn < 100; gsn += 2 {
+		a.Observe(gsn, now)
+	}
+	s, ok := a.SnapshotIfDue(now)
+	if !ok {
+		t.Fatal("gapped ACK not due")
+	}
+	if len(s.payload.SACK) != AckMaxSACKRanges {
+		t.Fatalf("SACK range count = %d, want cap %d", len(s.payload.SACK), AckMaxSACKRanges)
+	}
+}
+
+func TestACKStateRepresentsMissingGSNZero(t *testing.T) {
+	a := newACKState()
+	now := time.Unix(1_700_000_000, 0)
+	a.Observe(1, now)
+
+	s, ok := a.SnapshotIfDue(now)
+	if !ok {
+		t.Fatal("gap should make ACK due")
+	}
+	if s.payload.HasCumulative {
+		t.Fatalf("HasCumulative = true before GSN 0 arrived")
+	}
+	if len(s.payload.SACK) != 1 || s.payload.SACK[0] != (AckRange{Start: 1, End: 1}) {
+		t.Fatalf("SACK = %#v, want [1,1]", s.payload.SACK)
+	}
+}
+
+func TestACKStateDelayedACKAndVersionSafety(t *testing.T) {
+	a := newACKState()
+	now := time.Unix(1_700_000_000, 0)
+	a.Observe(0, now)
+	if _, ok := a.SnapshotIfDue(now.Add(AckMaxDelay - time.Nanosecond)); ok {
+		t.Fatal("ACK became due before max delay")
+	}
+	s, ok := a.SnapshotIfDue(now.Add(AckMaxDelay))
+	if !ok {
+		t.Fatal("ACK not due at max delay")
+	}
+
+	a.Observe(1, now.Add(AckMaxDelay))
+	a.MarkSent(s.version)
+	if _, ok := a.SnapshotIfDue(now.Add(2 * AckMaxDelay)); !ok {
+		t.Fatal("old snapshot incorrectly cleared a newer receive event")
+	}
+}
+
+func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
+	q := newRetransmitQueue()
+	now := time.Unix(1_700_000_000, 0)
+	for gsn := uint64(0); gsn < 4; gsn++ {
+		q.Track(gsn, []byte{byte(gsn)}, 0, now)
+	}
+
+	q.Acknowledge(AckPayload{
+		HasCumulative: true,
+		CumulativeGSN: 0,
+		SACK:          []AckRange{{Start: 2, End: 3}},
+	})
+
+	if got := q.Due(now.Add(RetransmitFastDelay-time.Nanosecond), time.Second); len(got) != 0 {
+		t.Fatalf("fast retransmit fired before grace: %#v", got)
+	}
+	got := q.Due(now.Add(RetransmitFastDelay), time.Second)
+	if len(got) != 1 || got[0].GSN != 1 || got[0].Retries != 1 {
+		t.Fatalf("fast retransmit = %#v, want only GSN 1 retry 1", got)
+	}
+}
+
+func TestRetransmitQueueRetryLimit(t *testing.T) {
+	q := newRetransmitQueue()
+	now := time.Unix(1_700_000_000, 0)
+	q.Track(7, []byte("packet"), 0, now)
+
+	for retry := 1; retry <= RetransmitMaxRetries; retry++ {
+		got := q.Due(now.Add(time.Duration(retry)*RetransmitDefaultRTO), RetransmitDefaultRTO)
+		if len(got) != 1 || got[0].Retries != retry {
+			t.Fatalf("retry %d = %#v", retry, got)
+		}
+	}
+	if got := q.Due(now.Add(time.Duration(RetransmitMaxRetries+1)*RetransmitDefaultRTO), RetransmitDefaultRTO); len(got) != 0 {
+		t.Fatalf("queue retried beyond limit: %#v", got)
+	}
+	if len(q.packets) != 0 || q.bytes != 0 {
+		t.Fatalf("exhausted packet retained: packets=%d bytes=%d", len(q.packets), q.bytes)
+	}
+}
+
+func TestRetransmitQueuePacketBound(t *testing.T) {
+	q := newRetransmitQueue()
+	now := time.Unix(1_700_000_000, 0)
+	for gsn := uint64(0); gsn < RetransmitMaxPackets+10; gsn++ {
+		q.Track(gsn, []byte{1}, 0, now)
+	}
+	if len(q.packets) != RetransmitMaxPackets {
+		t.Fatalf("retained packets = %d, want %d", len(q.packets), RetransmitMaxPackets)
+	}
+	if _, ok := q.packets[0]; ok {
+		t.Fatal("oldest packet was not evicted")
+	}
+}
+
+func TestRetransmitQueueStripsPhysicalFlags(t *testing.T) {
+	q := newRetransmitQueue()
+	now := time.Unix(1_700_000_000, 0)
+	q.Track(1, []byte{1}, 0xff, now)
+
+	got := q.Due(now.Add(RetransmitDefaultRTO), RetransmitDefaultRTO)
+	if len(got) != 1 {
+		t.Fatalf("due packets = %#v", got)
+	}
+	if got[0].Flags != retransmitSemanticFlags {
+		t.Fatalf("retained flags = %#02x, want semantic-only %#02x", got[0].Flags, retransmitSemanticFlags)
+	}
+}
