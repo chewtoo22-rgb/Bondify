@@ -41,6 +41,7 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    testImplementation("junit:junit:4.13.2")
 }
 
 // bondifymobile.aar is generated, not committed (it bundles ~14MB of per-ABI native

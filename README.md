@@ -4,12 +4,13 @@ Free, open-source, self-hostable WAN bonding. Packet-level bonding of unlimited 
 connections into one tunnel — what Speedify should have been, without the subscription,
 the account, the telemetry, or the vendor-controlled relay.
 
-**Status: Phase 3 complete and verified.** Real multipath: PATH_ADD, per-path probing and
-health tracking, GSN-ordered reordering, real per-path BBR-style congestion control, and
-the full scheduler ladder — round robin, weighted-goodput, minRTT+cwnd, and HoL-blocking-
-aware. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full phase plan and
-[PROTOCOL.md](PROTOCOL.md) for the wire format. Do not use this yet as your only VPN — it
-is pre-alpha.
+**Status: pre-alpha.** Phases 0–4 have substantial implementations and staged network
+tests. The Phase 5 Android app builds into an APK, but its real-device acceptance gate
+(Wi-Fi+cellular aggregation, path churn, and 30-minute screen-off survival) has not passed.
+ACK-driven retransmission from the original Phase 4 scope is also still missing. See
+[PROJECT_STATUS.md](PROJECT_STATUS.md) for the live handoff/backlog,
+[ARCHITECTURE.md](ARCHITECTURE.md) for the phase plan, and
+[PROTOCOL.md](PROTOCOL.md) for the wire format. Do not use this yet as your only VPN.
 
 ## Read this before you expect anything from bonding
 
@@ -49,8 +50,8 @@ Three components sharing one core:
   FEC, congestion control, traffic classification, TUN abstraction. Platform-agnostic.
 - **`relay/`** — Go. Single static binary + systemd unit + one-line installer (coming in
   the release phase). Runs on the cheapest VPS you can find.
-- **`android/`** — Kotlin + Compose `VpnService` shell around a `gomobile`-built AAR of
-  `core/`. (Phase 5, not yet started.)
+- **`android/`** — Kotlin `VpnService` shell around a `gomobile`-built AAR of `core/`.
+  It builds, but has not passed the Phase 5 real-device gate.
 - **`desktop/`** — Go. `wintun`/tray on Windows, TUN + CLI on Linux/macOS. The Linux CLI
   (`desktop/cmd/bondify`) is what Phase 1 is built and verified against today.
 

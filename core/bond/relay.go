@@ -194,14 +194,17 @@ func NewRelay(cfg RelayConfig, dev tun.Device) (*Relay, error) {
 // GatewayIP is the relay's own address inside the tunnel subnet.
 func (r *Relay) GatewayIP() net.IP { return r.pool.Gateway() }
 
-// livenessLoop marks relay-side paths DEAD after PathDeadTimeout of no traffic, so the
-// relay's own round-robin stops wasting return-traffic capacity on a path the client has
-// abandoned. See path.go's doc comment for why the relay uses this simpler signal instead
-// of the full probe-driven state machine the client runs.
+// livenessLoop excludes a silent relay-side path from return-traffic scheduling after the
+// same three missed probe intervals used by the client, then marks it DEAD after
+// PathDeadTimeout. Waiting the full dead timeout before excluding it made a path killed
+// during a 12-second TCP flow remain eligible for the rest of the flow: the relay kept
+// round-robining retransmissions onto the dead address and the Phase 4 survivability gate
+// failed nondeterministically.
 func (r *Relay) livenessLoop() {
 	ticker := time.NewTicker(ProbeInterval)
 	defer ticker.Stop()
 	for range ticker.C {
+		now := time.Now()
 		r.mu.RLock()
 		sessions := make([]*relaySession, 0, len(r.byIndex))
 		for _, s := range r.byIndex {
@@ -216,11 +219,37 @@ func (r *Relay) livenessLoop() {
 			}
 			s.pathsMu.RUnlock()
 			for _, p := range paths {
-				if p.State() != sched.StateDead && p.LastActivity() > PathDeadTimeout {
-					p.state.Store(int32(sched.StateDead))
-				}
+				updateRelayPathLiveness(p, now)
 			}
 		}
+	}
+}
+
+// updateRelayPathLiveness applies one deterministic relay-side liveness tick.
+func updateRelayPathLiveness(p *Path, now time.Time) {
+	idle := p.LastActivityAt(now)
+	if idle == 0 {
+		return
+	}
+	if idle >= PathDeadTimeout {
+		p.state.Store(int32(sched.StateDead))
+		return
+	}
+	if idle >= RelayPathDegradeTimeout && p.State() == sched.StateActive {
+		p.degrade()
+	}
+}
+
+// restoreRelayPathFromProbe makes an already-registered path schedulable again after a
+// valid, replay-window-checked PROBE proves it has recovered. An unknown path must still
+// complete PATH_ADD and remains JOINING.
+func restoreRelayPathFromProbe(p *Path, isNew bool) {
+	if isNew {
+		return
+	}
+	switch p.State() {
+	case sched.StateDegraded, sched.StateDead:
+		p.SetActive()
 	}
 }
 
@@ -626,6 +655,7 @@ func (r *Relay) handleProbe(oh proto.OuterHeader, ciphertext []byte, src *net.UD
 		p.SetRemoteAddr(src) // NAT rebinding: latest source wins (rate limiting lands with phase 3's full state machine)
 	}
 	recvPSN := p.RecordRecv()
+	restoreRelayPathFromProbe(p, isNew)
 
 	ackPayload, err := marshalCBOR(ProbeAckPayload{SentAtUnixNano: probe.SentAtUnixNano, SentPSN: probe.SentPSN, RecvPSN: recvPSN})
 	if err != nil {
