@@ -51,7 +51,7 @@ var (
 // `clamp(loss * LossScale, 0, MaxRedundancy)` per ARCHITECTURE.md §2.3: at zero loss this
 // is zero (FEC effectively off, no bytes wasted); at 5%+ loss it saturates at
 // MaxRedundancy so a single generation is never more than 25% parity overhead regardless
-// the observed packet loss rate.
+// of how bad the path gets.
 func RedundancyFor(loss float64, n int) int {
 	if n <= 0 {
 		return 0
@@ -71,14 +71,13 @@ func RedundancyFor(loss float64, n int) int {
 }
 
 // ShardWidth returns the fixed per-shard byte width Reed-Solomon must operate over for a
-// ShardWidth returns the fixed shard width for a generation whose longest payload is maxPayloadLen bytes.
+// generation whose longest data-shard payload is maxPayloadLen bytes.
 func ShardWidth(maxPayloadLen int) int { return lengthPrefix + maxPayloadLen }
 
 // encodeShard produces the length-prefixed, zero-padded w-byte Reed-Solomon input for one
 // data packet's raw payload. Deterministic: the receiver reproduces this exact transform
 // for every data shard it actually received, so its bytes agree with what the sender's
-// encodeShard encodes a payload into a fixed-width shard with a length prefix.
-// It returns an error if the payload and prefix exceed the shard width.
+// encoder computed.
 func encodeShard(payload []byte, w int) ([]byte, error) {
 	if len(payload)+lengthPrefix > w {
 		return nil, errors.New("fec: payload exceeds shard width")
@@ -90,9 +89,7 @@ func encodeShard(payload []byte, w int) ([]byte, error) {
 }
 
 // decodeShard strips the self-describing length prefix back off a w-byte Reed-Solomon
-// decodeShard extracts the original payload from a length-prefixed shard.
-// It returns an error if the shard is shorter than the length prefix or if the
-// encoded payload extends beyond the shard.
+// shard, returning the original (or reconstructed) payload at its true length.
 func decodeShard(buf []byte) ([]byte, error) {
 	if len(buf) < lengthPrefix {
 		return nil, errors.New("fec: shard shorter than length prefix")
@@ -107,9 +104,7 @@ func decodeShard(buf []byte) ([]byte, error) {
 // EncodeParity computes m parity shards from dataShards (one generation's worth of raw,
 // variable-length packet payloads, indices 0..n-1), each padded to width w. w must be at
 // least ShardWidth(len(longest dataShards[i])). Returns m parity shards, each exactly w
-// EncodeParity generates m fixed-width parity shards for the provided data payloads.
-// Each parity shard is ready for transmission as-is. It returns ErrEmptyGeneration
-// when dataShards is empty and returns nil when m is zero.
+// bytes, ready to send on the wire as-is.
 func EncodeParity(dataShards [][]byte, w, m int) ([][]byte, error) {
 	n := len(dataShards)
 	if n == 0 {
@@ -149,9 +144,7 @@ func EncodeParity(dataShards [][]byte, w, m int) ([][]byte, error) {
 // exactly as they arrived. Returns a map from data-shard index to its recovered original
 // payload, for every data index that was missing (present[i] == false, i < n) but could be
 // recovered. Returns ErrTooFewShards if fewer than n total shards (data+parity combined)
-// Reconstruct recovers missing data payloads from the available data and parity shards.
-// It returns a map keyed by the missing data-shard indices and ErrTooFewShards when
-// fewer than n shards are present.
+// are present -- Reed-Solomon's fundamental floor, not a bug to retry around.
 func Reconstruct(shards [][]byte, present []bool, n, m, w int) (map[int][]byte, error) {
 	if n <= 0 {
 		return nil, ErrEmptyGeneration

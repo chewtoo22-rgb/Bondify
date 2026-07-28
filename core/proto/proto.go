@@ -244,9 +244,7 @@ func MarshalFECHeader(dst []byte, h FECHeader) error {
 	return nil
 }
 
-// UnmarshalFECHeader parses an FEC header from src.
-// It returns the parsed header, the number of bytes consumed, and ErrShortBuffer
-// if src is shorter than FECHeaderLen.
+// UnmarshalFECHeader parses FECHeader from src, returning bytes consumed (FECHeaderLen).
 func UnmarshalFECHeader(src []byte) (FECHeader, int, error) {
 	var h FECHeader
 	if len(src) < FECHeaderLen {

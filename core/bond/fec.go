@@ -32,7 +32,6 @@ type fecSender struct {
 // generation permanently unprotected.
 const FECGenTimeout = 30 * time.Millisecond
 
-// newFECSender creates a sender that estimates packet loss and emits generated parity shards through the provided callback.
 func newFECSender(lossEstimate func() float64, sendParity func(genID uint16, genIndex, n, m, w int, shard []byte)) *fecSender {
 	return &fecSender{lossEstimate: lossEstimate, sendParity: sendParity}
 }
@@ -127,7 +126,6 @@ type fecGenBuffer struct {
 	gens map[uint16]*fecGeneration
 }
 
-// newFECGenBuffer creates an empty FEC generation buffer.
 func newFECGenBuffer() *fecGenBuffer {
 	return &fecGenBuffer{gens: make(map[uint16]*fecGeneration)}
 }
@@ -219,7 +217,7 @@ func (b *fecGenBuffer) GC(maxAge time.Duration) {
 // push the payload into its reorder buffer under the recovered header's GSN. Reports false
 // if the reconstructed bytes don't parse as a valid inner header -- reconstruction succeeds
 // at the erasure-coding level but the result is still just bytes, so this stays a normal,
-// It reports whether the plaintext contains a valid inner data header.
+// handled outcome rather than a panic-worthy invariant violation.
 func unmarshalRecovered(innerPlaintext []byte) (proto.InnerDataHeader, []byte, bool) {
 	h, n, err := proto.UnmarshalInner(innerPlaintext)
 	if err != nil {

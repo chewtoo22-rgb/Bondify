@@ -23,9 +23,6 @@ import (
 	"github.com/chewtoo22-rgb/bondify/relay/nat"
 )
 
-// main starts the relay service, configures its tunnel and optional NAT, and runs
-// the configured traffic, FEC, reordering, and diagnostics services until an
-// operating error occurs or the process receives an interrupt or termination signal.
 func main() {
 	var (
 		listen    = flag.String("listen", ":51820", "UDP listen address")

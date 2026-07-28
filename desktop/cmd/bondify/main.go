@@ -23,8 +23,6 @@ import (
 	"github.com/chewtoo22-rgb/bondify/core/tun"
 )
 
-// main parses client options, establishes the relay tunnel, configures the TUN
-// interface and routes, and runs diagnostics and tunnel monitoring until shutdown.
 func main() {
 	var (
 		relayAddr   = flag.String("relay", "", "relay address, host:port (required)")

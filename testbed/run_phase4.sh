@@ -39,12 +39,9 @@ TWO_TOPO=testbed/topo/two_path.sh
 BUILD=build
 FAIL=0
 
-# log prints a phase 4 message to standard error.
 log() { echo "[phase4] $*" >&2; }
-# fail records a phase 4 gate failure and sets the overall failure flag.
 fail() { echo "[phase4] FAIL: $*" >&2; FAIL=1; }
 
-# cleanup stops background test processes and tears down both network topologies.
 cleanup() {
 	kill "${RELAY_PID:-}" "${CLIENT_PID:-}" "${IPERF_PID:-}" 2>/dev/null || true
 	sleep 1
