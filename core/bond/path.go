@@ -207,9 +207,11 @@ func (p *Path) HandleProbeAck(ack ProbeAckPayload, now time.Time) {
 
 	// Feed core/cc a delivery-rate sample for this interval: bytes sent since the last
 	// probe, scaled down by the same deltaRecv/deltaSent fraction just computed for loss,
-	// approximates bytes actually delivered (we have no per-packet ACK yet -- PROBE_ACK's
-	// PSN-delta reflection is the only delivery signal that exists today; see this
-	// function's loss comment above for why deltaSent==0 already gets handled). Elapsed
+	// approximates bytes actually delivered. Per-packet ACK/SACK now exists for bounded
+	// retransmission, but it does not yet feed per-original-path delivery timing into
+	// congestion control; PROBE_ACK's PSN-delta reflection remains this controller's
+	// delivery signal. See this function's loss comment above for why deltaSent==0 is
+	// already handled. Elapsed
 	// time is wall-clock since the last PROBE_ACK, tracked separately from
 	// lastProbeAckAt (below), which RecordRecv also touches on every DATA/PROBE arrival
 	// and so can't double as "time of the last probe specifically."
