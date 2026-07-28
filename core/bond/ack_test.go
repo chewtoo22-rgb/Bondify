@@ -269,6 +269,10 @@ func TestRetransmitRTOMultipathFloor(t *testing.T) {
 	if got := retransmitRTO([]*Path{one}); got != RetransmitDefaultRTO {
 		t.Fatalf("unmeasured single-path RTO = %s, want %s", got, RetransmitDefaultRTO)
 	}
+	one.SetPeerRTTMin(15 * time.Millisecond)
+	if got := retransmitRTO([]*Path{one}); got != RetransmitMinRTO {
+		t.Fatalf("low-RTT single-path RTO = %s, want floor %s", got, RetransmitMinRTO)
+	}
 
 	two := NewPath(1, nil)
 	two.SetActive()
