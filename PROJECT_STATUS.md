@@ -37,8 +37,9 @@ Branch: `agent/ack-sack-retransmission`
   counters, reorder occupancy, and reorder deadline in both directions.
 - A GSN tracker stays independent of reorder delivery so a deadline-forced release cannot
   falsely acknowledge a packet that never arrived.
-- Gaps trigger immediate SACK feedback; ordinary ACKs use the specified 8-packet/20 ms
-  delayed-ACK policy and the lowest-RTT ACTIVE path.
+- The first observation of each cumulative gap triggers immediate SACK feedback; packets
+  above the same persistent gap return to the specified 8-packet/20 ms cadence, preventing
+  slow-path reordering from creating an ACK storm. ACKs use the lowest-RTT ACTIVE path.
 - Senders retain at most 4096 packets / 8 MiB, retry at most three times, and process at
   most 64 retransmissions per maintenance tick.
 - Fast retransmission requires three SACK reports of the same hole, then waits 10 ms on a
