@@ -47,6 +47,7 @@ type AckRange struct {
 type AckPathCounter struct {
 	PathID   uint8  `cbor:"pid"`
 	Received uint32 `cbor:"recv"`
+	RTTUsec  uint32 `cbor:"rtt,omitempty"`
 }
 
 // AckPayload is the authenticated CBOR payload carried by proto.TypeAck.
@@ -446,10 +447,35 @@ func lowestRTTActivePath(paths []*Path) *Path {
 func ackPathCounters(paths []*Path) []AckPathCounter {
 	out := make([]AckPathCounter, 0, len(paths))
 	for _, p := range paths {
-		out = append(out, AckPathCounter{PathID: p.id, Received: p.recvPSN.Load()})
+		rttUsec := p.RTTMin() / time.Microsecond
+		if rttUsec > time.Duration(math.MaxUint32) {
+			rttUsec = time.Duration(math.MaxUint32)
+		}
+		out = append(out, AckPathCounter{
+			PathID:   p.id,
+			Received: p.recvPSN.Load(),
+			RTTUsec:  uint32(rttUsec),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PathID < out[j].PathID })
 	return out
+}
+
+// applyACKPathState shares the probing side's path RTT with the peer. Today the client
+// runs active probes while the relay does not, so without this authenticated feedback the
+// relay sees every path as equally unmeasured and round-robins return traffic across a
+// 15ms and a 200ms path. That delays inner TCP ACKs and defeats HoL-aware scheduling even
+// though the client correctly keeps forward traffic on the fast path.
+func applyACKPathState(ack AckPayload, paths []*Path) {
+	byID := make(map[uint8]*Path, len(paths))
+	for _, p := range paths {
+		byID[p.id] = p
+	}
+	for _, counter := range ack.PathCounters {
+		if p := byID[counter.PathID]; p != nil && counter.RTTUsec > 0 {
+			p.SetPeerRTTMin(time.Duration(counter.RTTUsec) * time.Microsecond)
+		}
+	}
 }
 
 func fillACKReceiverState(ack *AckPayload, paths []*Path, b *reorder.Buffer) {
