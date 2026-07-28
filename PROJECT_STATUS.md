@@ -20,7 +20,7 @@ must not cause an incompatible protocol change.
 | Phase 1: one-path tunnel | Linux client, relay, Noise tunnel, NAT | Netns ping/HTTP/encryption/throughput gate | Release-quality installation and external security review |
 | Phase 2: multipath | PATH_ADD, probing, GSN reorder, round robin | Two-path netns runs and CI gate | More churn/flapping coverage |
 | Phase 3: scheduling | Weighted, minRTT+cwnd, HoL-aware schedulers | Unit tests, shaped benchmark gate in CI | Relay-side measurement/pacing remains simplified |
-| Phase 4: resilience | REDUNDANT mode and adaptive Reed-Solomon FEC | FEC CI sub-gate passed at 0.23% post-FEC loss; path-death sub-gate exposed relay liveness lag | Relay liveness fix is awaiting CI; ACK/SACK retransmission remains missing |
+| Phase 4: resilience | REDUNDANT mode and adaptive Reed-Solomon FEC | CI passes the real-loss FEC and mid-transfer path-death gates | ACK/SACK retransmission from the original specification remains missing |
 | Phase 5: Android | Kotlin app, VpnService shell, gomobile AAR build | APK compilation in CI | No real-device VPN, bonding, churn, or 30-minute screen-off gate has passed |
 | Phase 6+: product | Specifications only or partial scaffolding | Not verified | Windows app, intelligence, sharing, installer, signed releases |
 
@@ -54,7 +54,8 @@ Branch: `agent/android-path-lifecycle`
   relay kept scheduling return traffic onto a killed path until its 10-second DEAD timeout.
   Relay paths now leave ACTIVE scheduling after three missing 200 ms client probes, remain
   recoverable until the existing DEAD threshold, and return to ACTIVE on a valid
-  authenticated probe. Deterministic transition/recovery tests were added.
+  authenticated probe. Deterministic transition/recovery tests were added, and the complete
+  Phase 4 CI gate now passes.
 
 ### Still not fixed by this sprint
 
@@ -144,4 +145,6 @@ Add concise entries here; link the pull request or commit when available.
   failed because relay-side scheduling waited the full 10-second DEAD timeout before
   excluding the killed path.
 - 2026-07-28 - Relay fast-degrade/authenticated-recovery fix and unit tests added to PR #4;
-  full CI rerun pending.
+  GitHub Actions run 30372670159 passed lint, Go race tests, all cross-builds, Android unit
+  tests/AAR/debug APK, and every network gate including Phase 4 FEC recovery and TCP
+  survival after a path dies.
