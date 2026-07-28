@@ -124,6 +124,19 @@ func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
 		CumulativeGSN: 0,
 		SACK:          []AckRange{{Start: 2, End: 3}},
 	})
+	q.Acknowledge(AckPayload{
+		HasCumulative: true,
+		CumulativeGSN: 0,
+		SACK:          []AckRange{{Start: 2, End: 3}},
+	})
+	if got := q.Due(now.Add(RetransmitFastDelay), time.Second); len(got) != 0 {
+		t.Fatalf("fast retransmit fired before %d SACK reports: %#v", RetransmitSACKThreshold, got)
+	}
+	q.Acknowledge(AckPayload{
+		HasCumulative: true,
+		CumulativeGSN: 0,
+		SACK:          []AckRange{{Start: 2, End: 3}},
+	})
 
 	if got := q.Due(now.Add(RetransmitFastDelay-time.Nanosecond), time.Second); len(got) != 0 {
 		t.Fatalf("fast retransmit fired before grace: %#v", got)
