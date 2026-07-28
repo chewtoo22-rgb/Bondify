@@ -20,7 +20,7 @@ must not cause an incompatible protocol change.
 | Phase 1: one-path tunnel | Linux client, relay, Noise tunnel, NAT | Netns ping/HTTP/encryption/throughput gate | Release-quality installation and external security review |
 | Phase 2: multipath | PATH_ADD, probing, GSN reorder, round robin | Two-path netns runs and CI gate | More churn/flapping coverage |
 | Phase 3: scheduling | Weighted, minRTT+cwnd, HoL-aware schedulers | Unit tests, shaped benchmark gate in CI | Relay-side measurement/pacing remains simplified |
-| Phase 4: resilience | REDUNDANT mode and adaptive Reed-Solomon FEC | Real-loss/path-death script has passed manually | ACK/SACK retransmission is missing; Phase 4 script was not in CI before the current sprint |
+| Phase 4: resilience | REDUNDANT mode and adaptive Reed-Solomon FEC | FEC CI sub-gate passed at 0.23% post-FEC loss; path-death sub-gate exposed relay liveness lag | Relay liveness fix is awaiting CI; ACK/SACK retransmission remains missing |
 | Phase 5: Android | Kotlin app, VpnService shell, gomobile AAR build | APK compilation in CI | No real-device VPN, bonding, churn, or 30-minute screen-off gate has passed |
 | Phase 6+: product | Specifications only or partial scaffolding | Not verified | Windows app, intelligence, sharing, installer, signed releases |
 
@@ -50,6 +50,11 @@ Branch: `agent/android-path-lifecycle`
 - The incorrect claim that the Android service already owns a wake lock was removed.
 - Phase 4's real-loss/FEC/path-death test script is now in CI. Its first CI execution on
   PR #4 failed, proving the previous manual pass was not yet a reliable continuous gate.
+- The Phase 4 failure was isolated: FEC passed at 0.23% application-visible loss, but the
+  relay kept scheduling return traffic onto a killed path until its 10-second DEAD timeout.
+  Relay paths now leave ACTIVE scheduling after three missing 200 ms client probes, remain
+  recoverable until the existing DEAD threshold, and return to ACTIVE on a valid
+  authenticated probe. Deterministic transition/recovery tests were added.
 
 ### Still not fixed by this sprint
 
@@ -135,5 +140,8 @@ Add concise entries here; link the pull request or commit when available.
   https://github.com/chewtoo22-rgb/Bondify/pull/4
 - 2026-07-28 - PR #4 CI: lint, Go race tests, all cross-builds, Android endpoint unit
   tests, gomobile AAR, and debug APK succeeded. Network Phases 1-3 succeeded. The newly
-  enabled Phase 4 real-loss/FEC/path-death step failed. Root cause is not recorded yet;
-  inspect the failing job log before changing the implementation or relaxing the gate.
+  enabled Phase 4 FEC sub-gate passed at 0.23% post-FEC loss; the path-death sub-gate
+  failed because relay-side scheduling waited the full 10-second DEAD timeout before
+  excluding the killed path.
+- 2026-07-28 - Relay fast-degrade/authenticated-recovery fix and unit tests added to PR #4;
+  full CI rerun pending.
