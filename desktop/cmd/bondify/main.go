@@ -109,6 +109,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("client: bad -mode: %v", err)
 	}
+	if *fec && sendMode == bond.ModeRedundant {
+		// sendRedundant never stamps FlagFECProtected or records into fecSend (REDUNDANT's
+		// own duplication already provides loss protection), so FEC would sit permanently
+		// allocated and inert -- paying its per-packet generation-buffer copy cost for zero
+		// benefit. Silently reflecting that here, rather than only in a doc comment, keeps
+		// an operator combining both flags from believing FEC is doing anything.
+		log.Printf("client: warning: -fec has no effect in -mode redundant; disabling it")
+		*fec = false
+	}
 
 	t, cfg, err := bond.DialClient(ctx, bond.ClientConfig{
 		RelayAddr:   *relayAddr,

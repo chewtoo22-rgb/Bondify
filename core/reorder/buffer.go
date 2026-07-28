@@ -129,11 +129,12 @@ func (b *Buffer) ForcedReleases() uint64 { return b.forcedReleases.Load() }
 // so both land in Push before nextExpected has had any chance to advance past that GSN.
 // Missing this case is a real bug found under real REDUNDANT-mode traffic, not a
 // theoretical one: without it, the second copy pushes a second heap entry with the same
-// GSN, which is never drained (drainLocked only matches an exact head==nextExpected) and
-// is never force-released correctly either -- forceReleaseHeadLocked sets nextExpected to
-// pkt.GSN+1 unconditionally, so if that stale duplicate ever surfaces as the heap's new
-// minimum, it drives nextExpected *backwards*, corrupting delivery order for everything
-// after it.
+// GSN. drainLocked only matches an exact head==nextExpected, so once the first copy
+// delivers and nextExpected moves past that GSN, the stale twin is stuck -- it can never
+// drain normally again. It doesn't just sit inertly, though: if it later surfaces as the
+// heap's new minimum (on deadline expiry or overflow), forceReleaseHeadLocked emits it
+// unconditionally, delivering that GSN's payload a *second* time to an already-advanced
+// consumer, on top of holding its bytes in curBytes the whole time it was stuck.
 func (b *Packet) size() int { return len(b.Payload) }
 
 func (b *Buffer) Push(pkt Packet) {

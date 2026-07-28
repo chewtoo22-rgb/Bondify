@@ -39,6 +39,13 @@ TWO_TOPO=testbed/topo/two_path.sh
 BUILD=build
 FAIL=0
 
+# A private, unpredictable directory for every artifact this script writes (logs, keys,
+# iperf3 JSON, exit-code files) -- this runs as root under sudo, and a fixed /tmp/bondify-
+# phase4-* path is guessable, so a local user could pre-create a symlink at one of those
+# paths and redirect a root write elsewhere (CWE-377). mktemp -d is racy-safe and only this
+# script's own process can predict the resulting path.
+ARTIFACTS=$(mktemp -d)
+
 log() { echo "[phase4] $*" >&2; }
 fail() { echo "[phase4] FAIL: $*" >&2; FAIL=1; }
 
@@ -47,6 +54,7 @@ cleanup() {
 	sleep 1
 	bash "$SINGLE_TOPO" down 2>/dev/null || true
 	bash "$TWO_TOPO" down 2>/dev/null || true
+	rm -rf "$ARTIFACTS"
 }
 trap cleanup EXIT
 
@@ -57,8 +65,8 @@ go build -o "$BUILD/bondify" ./desktop/cmd/bondify
 
 # Confirm xt_statistic is actually usable before committing to either sub-gate -- probed
 # with a rule that's immediately removed again, no lasting effect.
-if ! iptables -t filter -A OUTPUT -m statistic --mode random --probability 0.5 -j ACCEPT 2>/tmp/bondify-phase4-statistic-check.err; then
-	log "WARNING: iptables xt_statistic unavailable on this kernel ($(cat /tmp/bondify-phase4-statistic-check.err)); phase 4 gates cannot be meaningfully evaluated here. Exiting without pass/fail."
+if ! iptables -t filter -A OUTPUT -m statistic --mode random --probability 0.5 -j ACCEPT 2>"$ARTIFACTS/statistic-check.err"; then
+	log "WARNING: iptables xt_statistic unavailable on this kernel ($(cat "$ARTIFACTS/statistic-check.err")); phase 4 gates cannot be meaningfully evaluated here. Exiting without pass/fail."
 	exit 0
 fi
 iptables -t filter -D OUTPUT -m statistic --mode random --probability 0.5 -j ACCEPT
@@ -72,28 +80,28 @@ bash "$SINGLE_TOPO" up
 
 ip netns exec bondify-relay "$PWD/$BUILD/bondify-relay" \
 	-listen :51820 -pool 10.77.0.0/24 -tun bondify0 \
-	-key-file /tmp/bondify-phase4-relay.key -nat-iface v-rel-out -mtu 1408 \
+	-key-file "$ARTIFACTS/relay.key" -nat-iface v-rel-out -mtu 1408 \
 	-fec=true -diag-addr "" \
-	>/tmp/bondify-phase4-relay.log 2>&1 &
+	>"$ARTIFACTS/relay.log" 2>&1 &
 RELAY_PID=$!
 sleep 1
-RELAY_PUB=$(grep -oE '[A-Za-z0-9+/=]{40,}' /tmp/bondify-phase4-relay.log | head -1)
+RELAY_PUB=$(grep -oE '[A-Za-z0-9+/=]{40,}' "$ARTIFACTS/relay.log" | head -1)
 if [ -z "$RELAY_PUB" ]; then
 	fail "sub-gate A: relay did not print a public key"
-	cat /tmp/bondify-phase4-relay.log >&2
+	cat "$ARTIFACTS/relay.log" >&2
 	exit 1
 fi
 
 ip netns exec bondify-client "$PWD/$BUILD/bondify" \
 	-relay 10.60.0.2:51820 -relay-pubkey "$RELAY_PUB" \
-	-tun bondify0 -key-file /tmp/bondify-phase4-client.key -default-route -mtu 1408 \
+	-tun bondify0 -key-file "$ARTIFACTS/client.key" -default-route -mtu 1408 \
 	-fec=true -diag-addr "" \
-	>/tmp/bondify-phase4-client.log 2>&1 &
+	>"$ARTIFACTS/client.log" 2>&1 &
 CLIENT_PID=$!
 sleep 2
-if ! grep -q "tun bondify0 up" /tmp/bondify-phase4-client.log; then
+if ! grep -q "tun bondify0 up" "$ARTIFACTS/client.log"; then
 	fail "sub-gate A: client tunnel did not come up"
-	cat /tmp/bondify-phase4-client.log >&2
+	cat "$ARTIFACTS/client.log" >&2
 	exit 1
 fi
 
@@ -101,7 +109,7 @@ log "injecting 5% real random loss on the relay's inbound UDP from the client (s
 ip netns exec bondify-relay iptables -A INPUT -i v-rel-wan -p udp --dport 51820 \
 	-m statistic --mode random --probability 0.05 -j DROP
 
-ip netns exec bondify-relay iperf3 -s -B 10.77.0.1 -p 5700 >/tmp/bondify-phase4-iperf-server.log 2>&1 &
+ip netns exec bondify-relay iperf3 -s -B 10.77.0.1 -p 5700 >"$ARTIFACTS/iperf-server.log" 2>&1 &
 IPERF_PID=$!
 sleep 1
 
@@ -110,8 +118,8 @@ ip netns exec bondify-client iperf3 -c 10.77.0.1 -p 5700 -u -b 20M -t 5 >/dev/nu
 
 log "sub-gate A: running the measured non-saturating UDP flow through the lossy path"
 if timeout 20 ip netns exec bondify-client iperf3 -c 10.77.0.1 -p 5700 -u -b 20M -t 8 -J \
-	>/tmp/bondify-phase4-iperf-a.json 2>/tmp/bondify-phase4-iperf-a.err; then
-	GOODPUT_LOSS=$(python3 -c "import json;d=json.load(open('/tmp/bondify-phase4-iperf-a.json'));print(d['end']['sum']['lost_percent'])")
+	>"$ARTIFACTS/iperf-a.json" 2>"$ARTIFACTS/iperf-a.err"; then
+	GOODPUT_LOSS=$(python3 -c "import json;d=json.load(open('$ARTIFACTS/iperf-a.json'));print(d['end']['sum']['lost_percent'])")
 	log "sub-gate A: application-visible (post-FEC) loss = ${GOODPUT_LOSS}%"
 	python3 -c "
 import sys
@@ -120,7 +128,7 @@ sys.exit(0 if loss < 1.0 else 1)
 " && log "PASS: sub-gate A (${GOODPUT_LOSS}% < 1%)" || fail "sub-gate A: goodput loss ${GOODPUT_LOSS}% >= 1%"
 else
 	fail "sub-gate A: iperf3 UDP flow through the tunnel did not complete"
-	cat /tmp/bondify-phase4-iperf-a.err >&2
+	cat "$ARTIFACTS/iperf-a.err" >&2
 fi
 
 kill "$RELAY_PID" "$CLIENT_PID" "$IPERF_PID" 2>/dev/null || true
@@ -138,53 +146,54 @@ bash "$TWO_TOPO" up
 
 ip netns exec bondify-relay "$PWD/$BUILD/bondify-relay" \
 	-listen 10.99.0.1:51820 -pool 10.77.0.0/24 -tun bondify0 \
-	-key-file /tmp/bondify-phase4-relay2.key -nat-iface v-rel-out -mtu 1408 \
+	-key-file "$ARTIFACTS/relay2.key" -nat-iface v-rel-out -mtu 1408 \
 	-fec=true -diag-addr "" \
-	>/tmp/bondify-phase4-relay2.log 2>&1 &
+	>"$ARTIFACTS/relay2.log" 2>&1 &
 RELAY_PID=$!
 sleep 1
-RELAY_PUB=$(grep -oE '[A-Za-z0-9+/=]{40,}' /tmp/bondify-phase4-relay2.log | head -1)
+RELAY_PUB=$(grep -oE '[A-Za-z0-9+/=]{40,}' "$ARTIFACTS/relay2.log" | head -1)
 if [ -z "$RELAY_PUB" ]; then
 	fail "sub-gate B: relay did not print a public key"
-	cat /tmp/bondify-phase4-relay2.log >&2
+	cat "$ARTIFACTS/relay2.log" >&2
 	exit 1
 fi
 
 ip netns exec bondify-client "$PWD/$BUILD/bondify" \
 	-relay 10.99.0.1:51820 -relay-pubkey "$RELAY_PUB" \
-	-tun bondify0 -key-file /tmp/bondify-phase4-client2.key -default-route -mtu 1408 \
+	-tun bondify0 -key-file "$ARTIFACTS/client2.key" -default-route -mtu 1408 \
 	-local-addrs "10.60.0.1,10.61.0.1" -fec=true -diag-addr "" \
-	>/tmp/bondify-phase4-client2.log 2>&1 &
+	>"$ARTIFACTS/client2.log" 2>&1 &
 CLIENT_PID=$!
 sleep 2
-if ! grep -q "paths=2" /tmp/bondify-phase4-client2.log; then
+if ! grep -q "paths=2" "$ARTIFACTS/client2.log"; then
 	fail "sub-gate B: client did not establish both paths"
-	cat /tmp/bondify-phase4-client2.log >&2
+	cat "$ARTIFACTS/client2.log" >&2
 	exit 1
 fi
 
-ip netns exec bondify-relay iperf3 -s -B 10.77.0.1 -p 5701 >/tmp/bondify-phase4-iperf-server-b.log 2>&1 &
+ip netns exec bondify-relay iperf3 -s -B 10.77.0.1 -p 5701 >"$ARTIFACTS/iperf-server-b.log" 2>&1 &
 IPERF_PID=$!
 sleep 1
 
 log "sub-gate B: starting a 12s TCP transfer, killing path 1 (v-cli-wan1) 4s in"
 (
 	timeout 20 ip netns exec bondify-client iperf3 -c 10.77.0.1 -p 5701 -t 12 -J \
-		>/tmp/bondify-phase4-iperf-b.json 2>/tmp/bondify-phase4-iperf-b.err
-	echo $? >/tmp/bondify-phase4-iperf-b.exit
+		>"$ARTIFACTS/iperf-b.json" 2>"$ARTIFACTS/iperf-b.err"
+	echo $? >"$ARTIFACTS/iperf-b.exit"
 ) &
 IPERF_CLIENT_PID=$!
 sleep 4
-log "killing path 1 outright (100% loss, simulating a dead uplink)"
+log "killing path 1 outright (100% loss, simulating a dead uplink) -- both directions, so relay-to-client return traffic on the dying path stops too, not just the client's own sends"
 ip netns exec bondify-client iptables -A OUTPUT -o v-cli-wan1 -j DROP
+ip netns exec bondify-client iptables -A INPUT -i v-cli-wan1 -j DROP
 wait "$IPERF_CLIENT_PID" || true
 
-if [ ! -f /tmp/bondify-phase4-iperf-b.exit ] || [ "$(cat /tmp/bondify-phase4-iperf-b.exit)" -ne 0 ]; then
+if [ ! -f "$ARTIFACTS/iperf-b.exit" ] || [ "$(cat "$ARTIFACTS/iperf-b.exit")" -ne 0 ]; then
 	fail "sub-gate B: TCP transfer did not complete after path 1 died"
-	cat /tmp/bondify-phase4-iperf-b.err >&2 2>/dev/null || true
+	cat "$ARTIFACTS/iperf-b.err" >&2 2>/dev/null || true
 else
-	RETRANSMITS=$(python3 -c "import json;d=json.load(open('/tmp/bondify-phase4-iperf-b.json'));print(d['end']['sum_sent'].get('retransmits','n/a'))" 2>/dev/null || echo "n/a")
-	MBPS=$(python3 -c "import json;d=json.load(open('/tmp/bondify-phase4-iperf-b.json'));print(d['end']['sum_received']['bits_per_second']/1e6)")
+	RETRANSMITS=$(python3 -c "import json;d=json.load(open('$ARTIFACTS/iperf-b.json'));print(d['end']['sum_sent'].get('retransmits','n/a'))" 2>/dev/null || echo "n/a")
+	MBPS=$(python3 -c "import json;d=json.load(open('$ARTIFACTS/iperf-b.json'));print(d['end']['sum_received']['bits_per_second']/1e6)")
 	log "PASS: sub-gate B -- TCP transfer completed on the surviving path (retransmits=${RETRANSMITS}, ${MBPS} Mbps average)"
 fi
 

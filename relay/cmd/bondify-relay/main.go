@@ -86,6 +86,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("relay: bad -mode: %v", err)
 	}
+	if *fec && sendMode == bond.ModeRedundant {
+		// See the matching check in desktop/cmd/bondify/main.go: sendRedundant never
+		// stamps FlagFECProtected or records into fecSend, so FEC would sit permanently
+		// allocated and inert for the relay's own return traffic too.
+		log.Printf("relay: warning: -fec has no effect in -mode redundant; disabling it")
+		*fec = false
+	}
 
 	r, err := bond.NewRelay(bond.RelayConfig{
 		ListenAddr: *listen,

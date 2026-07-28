@@ -28,12 +28,15 @@ const (
 	// LossScale is not itself part of PROTOCOL.md's spec (only K and MaxRedundancy are);
 	// it's the multiplier this implementation uses to translate an observed mean loss rate
 	// into a redundancy ratio. It's deliberately steep, not a 1:1 scale-up: a generation is
-	// only K=10 packets, so at a "5% loss" mean the actual number of losses in any given
-	// generation is binomially distributed, not a constant -- e.g. real measurement at
-	// K=10, 5% iid loss found m=2 (the previous, gentler scale of 2.5) left ~1.16% of
-	// generations losing 3+ packets and going unrecovered, above the <1% goodput-loss gate
-	// (ARCHITECTURE.md §5). Saturating the MaxRedundancy cap by 5% mean loss instead of
-	// 10% pushes that down near 0.11%, comfortably under the gate. See ARCHITECTURE.md §9.
+	// K+m shards on the wire, data and parity both equally subject to loss, and
+	// reconstruction needs at least K of those K+m to survive -- so the number of losses in
+	// any given generation is binomially distributed over K+m trials, not a constant. E.g.
+	// real measurement at K=10, 5% iid loss found m=2 (the previous, gentler scale of 2.5,
+	// 12 total shards) left ~1.96% of generations losing more than 2 of the 12 and going
+	// unrecovered, above the <1% goodput-loss gate (ARCHITECTURE.md §5). Saturating the
+	// MaxRedundancy cap by 5% mean loss instead of 10% gives m=3 (13 total shards) at the
+	// gate's own loss level, pushing that down to ~0.31%, comfortably under the gate. See
+	// ARCHITECTURE.md §9.
 	LossScale    = 5.0
 	lengthPrefix = 2 // bytes reserved for each shard's self-describing length
 )
@@ -81,6 +84,12 @@ func ShardWidth(maxPayloadLen int) int { return lengthPrefix + maxPayloadLen }
 func encodeShard(payload []byte, w int) ([]byte, error) {
 	if len(payload)+lengthPrefix > w {
 		return nil, errors.New("fec: payload exceeds shard width")
+	}
+	if len(payload) > math.MaxUint16 {
+		// The length prefix is 2 bytes; a payload this large would silently wrap instead
+		// of erroring. Unreachable via real traffic (BOND/1 payloads top out at the tunnel
+		// MTU, far below 64KiB), but the bound check above alone doesn't imply this one.
+		return nil, errors.New("fec: payload exceeds the 2-byte length prefix's range")
 	}
 	buf := make([]byte, w)
 	binary.BigEndian.PutUint16(buf[0:lengthPrefix], uint16(len(payload)))

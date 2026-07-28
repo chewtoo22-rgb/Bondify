@@ -233,3 +233,89 @@ func TestUnmarshalRecoveredRejectsGarbage(t *testing.T) {
 		t.Fatal("expected unmarshalRecovered to reject a too-short buffer")
 	}
 }
+
+func TestFECGenBufferRejectsMalformedGeometry(t *testing.T) {
+	cases := []struct {
+		name               string
+		n, m, w, parityIdx int
+	}{
+		{"n zero", 0, 1, 8, 0},
+		{"n negative", -1, 1, 8, 0},
+		{"m zero", 5, 0, 8, 0},
+		{"m negative", 5, -1, 8, 0},
+		{"w zero", 5, 1, 0, 0},
+		{"parityIndex negative", 5, 1, 8, -1},
+		{"parityIndex equals m", 5, 1, 8, 1},
+		{"parityIndex exceeds m", 5, 2, 8, 5},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			buf := newFECGenBuffer()
+			recovered := buf.HandleFEC(0, c.n, c.m, c.w, c.parityIdx, make([]byte, 8))
+			if recovered != nil {
+				t.Fatalf("expected nil for malformed geometry, got %v", recovered)
+			}
+			if g, ok := buf.gens[0]; ok && len(g.parity) != 0 {
+				t.Fatalf("malformed parity shard was stored: %v", g.parity)
+			}
+		})
+	}
+}
+
+// TestFECGenBufferRejectsGeometryMismatch guards against a negative parityIndex (or any
+// wire-supplied value outside [0,m)) landing in shards[n+parityIndex] -- a data-range slot
+// -- and getting silently marked present, which would feed Reconstruct a corrupted shard
+// set instead of failing (found in review; see HandleFEC's doc comment).
+func TestFECGenBufferRejectsGeometryMismatch(t *testing.T) {
+	buf := newFECGenBuffer()
+	if r := buf.HandleFEC(0, 5, 1, 8, 0, make([]byte, 8)); r != nil {
+		t.Fatalf("expected nil (not enough shards yet), got %v", r)
+	}
+	g := buf.gens[0]
+	if g.n != 5 || g.m != 1 || g.w != 8 {
+		t.Fatalf("geometry not pinned on first observation: got n=%d m=%d w=%d", g.n, g.m, g.w)
+	}
+	// A second packet under the same genID claiming different geometry must not redefine it.
+	if r := buf.HandleFEC(0, 6, 2, 16, 0, make([]byte, 16)); r != nil {
+		t.Fatalf("expected nil (geometry mismatch), got %v", r)
+	}
+	if g.n != 5 || g.m != 1 || g.w != 8 {
+		t.Fatalf("geometry was overwritten by a mismatched packet: got n=%d m=%d w=%d", g.n, g.m, g.w)
+	}
+}
+
+// TestFECGenBufferIgnoresOutOfRangeDataIndex is a regression test for a real bug found in
+// review: a DATA packet can reach the wire stamped with a generation that closed between
+// fecSender.NextSlot and Record (see ARCHITECTURE.md §9), carrying a genIndex equal to that
+// generation's own n -- out of range. HandleData stores it anyway (it doesn't yet know n).
+// Before this fix, HandleFEC's "nothing missing" check counted raw map length, so that
+// stray out-of-range entry could make a generation that genuinely lost a real shard look
+// complete, silently skipping recovery. It must be ignored instead, and the real missing
+// shard still correctly reconstructed.
+func TestFECGenBufferIgnoresOutOfRangeDataIndex(t *testing.T) {
+	const n, m, w = 3, 1, 8
+	payloads := [n][]byte{[]byte("a"), []byte("b"), []byte("c")}
+	parity, err := fec.EncodeParity(payloads[:], w, m)
+	if err != nil {
+		t.Fatalf("EncodeParity: %v", err)
+	}
+
+	buf := newFECGenBuffer()
+	// Real indices 0,1,2. Index 1 ("b") is missing; index 3 is a stray out-of-range entry
+	// from the sender-side race, not a valid shard.
+	buf.HandleData(0, 0, payloads[0])
+	buf.HandleData(0, 3, []byte("stale"))
+	buf.HandleData(0, 2, payloads[2])
+
+	recovered := buf.HandleFEC(0, n, m, w, 0, parity[0])
+	if recovered == nil {
+		t.Fatal("expected reconstruction to be attempted despite the stray out-of-range entry")
+	}
+	got, ok := recovered[1]
+	if !ok {
+		t.Fatalf("expected recovered[1], got %v", recovered)
+	}
+	if !bytes.Equal(got, payloads[1]) {
+		t.Fatalf("recovered payload = %q, want %q", got, payloads[1])
+	}
+}

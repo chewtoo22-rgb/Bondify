@@ -364,18 +364,20 @@ reporting, no account, no default relay logging; reproducible builds.
 - **`fec.LossScale` raised from 2.5 to 5.0 to close the remaining gap to the gate.** Once
   loss injection was fixed (above), 5% real loss with the original scale produced `m=2`
   parity shards per `K=10`-packet generation, saturating `FEC_MAX_REDUNDANCY` only at 10%+
-  mean loss as originally documented. But a generation is only 10 packets, so the *number*
-  of losses in any single generation is binomially distributed around that 5% mean, not
-  constant: at `m=2`, roughly 1.16% of generations statistically lose 3 or more of their 10
-  packets and go unrecovered — measured for real at 1.31%–1.59% goodput loss across
-  repeated runs, consistent with that math and above the gate's <1% bar.
-  `FEC_MAX_REDUNDANCY=0.25` is a hard PROTOCOL.md constant and wasn't touched; `LossScale`
-  is not spec-mandated (only `FEC_K` and `FEC_MAX_REDUNDANCY` are, per the Appendix), so it
-  was retuned to saturate the existing 0.25 cap at 5% mean loss instead of 10%, giving
-  `m=3` at the gate's own test condition. The same binomial math at `m=3` predicts ~0.11%
-  unrecovered, which is what repeated real runs now show (0.115%, 0.312%) — comfortably
-  under 1%, with real headroom rather than a coin-flip pass. See `core/fec/fec.go`'s
-  `LossScale` doc comment.
+  mean loss as originally documented. But a generation is only `K+m` shards on the wire
+  (data *and* parity both go through the same lossy relay INPUT rule, each independently
+  lost with probability 5%), and reconstruction needs at least `K` of those `K+m` to
+  survive — so the *number* of losses in any single generation is binomially distributed
+  around that 5% mean, not constant: at `m=2` (12 total shards), roughly 1.96% of
+  generations statistically lose more than 2 of the 12 and go unrecovered — measured for
+  real at 1.31%–1.59% goodput loss across repeated runs, consistent with that math and
+  above the gate's <1% bar. `FEC_MAX_REDUNDANCY=0.25` is a hard PROTOCOL.md constant and
+  wasn't touched; `LossScale` is not spec-mandated (only `FEC_K` and `FEC_MAX_REDUNDANCY`
+  are, per the Appendix), so it was retuned to saturate the existing 0.25 cap at 5% mean
+  loss instead of 10%, giving `m=3` (13 total shards) at the gate's own test condition. The
+  same binomial math at `m=3` predicts ~0.31% unrecovered, which is what repeated real runs
+  now show (0.115%, 0.312%) — comfortably under 1%, with real headroom rather than a
+  coin-flip pass. See `core/fec/fec.go`'s `LossScale` doc comment.
 - **`-fec` defaults to `false` on both binaries, found by a real CI regression on this PR's
   own `netem-gates` job.** It originally defaulted to `true` ("costs nothing at zero loss",
   per the flag's own now-corrected help text), but that's not literally true as

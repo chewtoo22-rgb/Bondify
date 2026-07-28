@@ -92,11 +92,17 @@ func TestDuplicateWhileBufferedDropped(t *testing.T) {
 	// arriving while the first copy is still buffered (out of order, waiting on a gap --
 	// exactly what happens when the same GSN is sent on two independent paths and both
 	// copies arrive before the gap ahead of them closes) used to create a second heap
-	// entry with the same GSN. That entry could never drain normally (drainLocked only
-	// matches head==nextExpected) and, if it ever surfaced as the heap's new minimum,
-	// forceReleaseHeadLocked would set nextExpected to its GSN+1 -- driving nextExpected
-	// *backwards* and corrupting delivery order for everything after it.
-	b := New(50*time.Millisecond, 0)
+	// entry with the same GSN. drainLocked only matches head==nextExpected, so once the
+	// real copy delivered and nextExpected moved past it, that stale twin could never
+	// drain normally again -- but it wasn't inert: if it later surfaced as the heap's new
+	// minimum (deadline expiry or overflow), forceReleaseHeadLocked delivered it anyway, a
+	// second, spurious copy of an already-delivered GSN. The 30ms wait this test used
+	// against a 50ms deadline was too short to observe that: it passed even with the bug
+	// present, since the stale entry hadn't been force-released yet. Waiting past the
+	// deadline (so a still-present bug's forced release would fire) and asserting zero
+	// occupancy after draining are both needed to actually exercise the failure path.
+	const deadline = 50 * time.Millisecond
+	b := New(deadline, 0)
 	b.Push(Packet{GSN: 3, Payload: []byte{3}}) // out of order (0-2 not yet here); buffered
 	b.Push(Packet{GSN: 3, Payload: []byte{3}}) // duplicate while still buffered
 
@@ -110,10 +116,13 @@ func TestDuplicateWhileBufferedDropped(t *testing.T) {
 			t.Fatalf("got GSN %d, want %d", p.GSN, i)
 		}
 	}
+	if got := b.Occupancy(); got != 0 {
+		t.Fatalf("buffer retained %d bytes after draining GSNs 0-3; the stale duplicate wasn't dropped", got)
+	}
 	select {
 	case p := <-b.Out():
-		t.Fatalf("unexpected extra delivery of GSN %d; the buffered duplicate should have been dropped", p.GSN)
-	case <-time.After(30 * time.Millisecond):
+		t.Fatalf("unexpected extra delivery of GSN %d; the buffered duplicate should have been dropped, not force-released later", p.GSN)
+	case <-time.After(2 * deadline):
 	}
 }
 

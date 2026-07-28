@@ -158,37 +158,60 @@ func (b *fecGenBuffer) HandleData(genID uint16, genIndex int, innerPlaintext []b
 // present (data+parity) and is missing at least one data shard, attempts reconstruction.
 // Returns a map of genIndex -> recovered inner plaintext for every data shard that was
 // missing and could be recovered (empty if nothing was missing, or reconstruction wasn't
-// yet possible -- both are ordinary, expected outcomes, not errors).
+// yet possible -- both are ordinary, expected outcomes, not errors). Rejects malformed
+// geometry outright: n/m/w must be positive and parityIndex must be in [0, m). Without this,
+// a wire-supplied parityIndex outside that range (e.g. negative, from a peer whose GenIndex
+// is less than N) writes into shards[n+parityIndex], landing inside the *data* index range
+// and getting marked present -- Reconstruct then silently computes wrong payloads from a
+// corrupted shard set instead of failing. Also pins n/m/w to the first FEC packet seen for
+// this generation; a later packet claiming different geometry (a stale/reordered send, or a
+// buggy peer) is dropped rather than allowed to redefine it mid-flight.
 func (b *fecGenBuffer) HandleFEC(genID uint16, n, m, w, parityIndex int, shard []byte) map[int][]byte {
+	if n <= 0 || m <= 0 || w <= 0 || parityIndex < 0 || parityIndex >= m {
+		return nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	g := b.getOrCreateLocked(genID)
-	g.n, g.m, g.w = n, m, w
+	if g.n == 0 {
+		g.n, g.m, g.w = n, m, w
+	} else if g.n != n || g.m != m || g.w != w {
+		return nil // geometry mismatch with what this generation was first observed as
+	}
 	g.parity[parityIndex] = append([]byte(nil), shard...)
 
-	if len(g.data) >= n {
+	// Count only data entries at a valid index -- a stale/out-of-range genIndex (e.g. from
+	// a data packet stamped just before its generation closed, see ARCHITECTURE.md §9)
+	// must not be able to masquerade as "nothing missing" and suppress a real recovery.
+	haveData := 0
+	for i := range g.data {
+		if i < g.n {
+			haveData++
+		}
+	}
+	if haveData >= g.n {
 		return nil // nothing missing
 	}
-	if len(g.data)+len(g.parity) < n {
+	if haveData+len(g.parity) < g.n {
 		return nil // not enough shards yet to even attempt reconstruction
 	}
 
-	shards := make([][]byte, n+m)
-	present := make([]bool, n+m)
+	shards := make([][]byte, g.n+g.m)
+	present := make([]bool, g.n+g.m)
 	for i, d := range g.data {
-		if i < n {
+		if i < g.n {
 			shards[i] = d
 			present[i] = true
 		}
 	}
 	for i, p := range g.parity {
-		if i < m {
-			shards[n+i] = p
-			present[n+i] = true
+		if i < g.m {
+			shards[g.n+i] = p
+			present[g.n+i] = true
 		}
 	}
 
-	recovered, err := fec.Reconstruct(shards, present, n, m, w)
+	recovered, err := fec.Reconstruct(shards, present, g.n, g.m, g.w)
 	if err != nil {
 		return nil // includes fec.ErrTooFewShards -- an expected outcome under heavy loss
 	}
