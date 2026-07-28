@@ -8,7 +8,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// Control-plane packets (PROBE, PROBE_ACK, PATH_ADD, PATH_DROP, CTRL) are sealed directly
+// Control-plane packets (PROBE, PROBE_ACK, ACK, PATH_ADD, PATH_DROP, CTRL) are sealed directly
 // with crypto.Session.Seal, skipping proto.InnerDataHeader entirely. That header exists to
 // carry GSN (data-stream reassembly order) and PSN/Generation (loss attribution and FEC)
 // for the tunnelled IP packet stream specifically -- control messages need neither: replay
