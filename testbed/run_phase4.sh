@@ -23,10 +23,12 @@
 # FEC, and it simply never arrives -- exactly the failure mode FEC is meant to recover
 # from. See ARCHITECTURE.md §9.
 #
-# Two independent sub-gates:
+# Three independent sub-gates:
 #   A. FEC:  single path, 5% random loss injected client->relay, real UDP traffic through
 #      the tunnel must show <1% loss at the application layer (iperf3's own count).
-#   B. Survivability: two paths, one is killed outright (100% loss) partway through a
+#   B. ACK/SACK retransmission: repeat the 5% random-loss UDP flow with FEC disabled; the
+#      authenticated selective-ACK/retransmission path alone must keep visible loss <1%.
+#   C. Survivability: two paths, one is killed outright (100% loss) partway through a
 #      long-running TCP transfer; the transfer must complete successfully on the
 #      surviving path alone, with zero resets.
 #
@@ -137,10 +139,72 @@ RELAY_PID=""; CLIENT_PID=""; IPERF_PID=""
 bash "$SINGLE_TOPO" down
 
 ##########################################################################
-# Sub-gate B: survivability -- TCP transfer completes with zero resets when
+# Sub-gate B: ACK/SACK retransmission -- 5% loss -> <1% visible loss with
+# FEC explicitly disabled.
+##########################################################################
+log "=== sub-gate B: ACK/SACK retransmission under 5% real random loss (FEC off) ==="
+bash "$SINGLE_TOPO" down 2>/dev/null || true
+bash "$SINGLE_TOPO" up
+
+ip netns exec bondify-relay "$PWD/$BUILD/bondify-relay" \
+	-listen :51820 -pool 10.77.0.0/24 -tun bondify0 \
+	-key-file "$ARTIFACTS/relay-ack.key" -nat-iface v-rel-out -mtu 1408 \
+	-fec=false -diag-addr "" \
+	>"$ARTIFACTS/relay-ack.log" 2>&1 &
+RELAY_PID=$!
+sleep 1
+RELAY_PUB=$(grep -oE '[A-Za-z0-9+/=]{40,}' "$ARTIFACTS/relay-ack.log" | head -1)
+if [ -z "$RELAY_PUB" ]; then
+	fail "sub-gate B: relay did not print a public key"
+	cat "$ARTIFACTS/relay-ack.log" >&2
+	exit 1
+fi
+
+ip netns exec bondify-client "$PWD/$BUILD/bondify" \
+	-relay 10.60.0.2:51820 -relay-pubkey "$RELAY_PUB" \
+	-tun bondify0 -key-file "$ARTIFACTS/client-ack.key" -default-route -mtu 1408 \
+	-fec=false -diag-addr "" \
+	>"$ARTIFACTS/client-ack.log" 2>&1 &
+CLIENT_PID=$!
+sleep 2
+if ! grep -q "tun bondify0 up" "$ARTIFACTS/client-ack.log"; then
+	fail "sub-gate B: client tunnel did not come up"
+	cat "$ARTIFACTS/client-ack.log" >&2
+	exit 1
+fi
+
+ip netns exec bondify-relay iptables -A INPUT -i v-rel-wan -p udp --dport 51820 \
+	-m statistic --mode random --probability 0.05 -j DROP
+
+ip netns exec bondify-relay iperf3 -s -B 10.77.0.1 -p 5702 >"$ARTIFACTS/iperf-server-ack.log" 2>&1 &
+IPERF_PID=$!
+sleep 1
+
+log "sub-gate B: running measured UDP flow with FEC disabled"
+if timeout 20 ip netns exec bondify-client iperf3 -c 10.77.0.1 -p 5702 -u -b 20M -t 8 -J \
+	>"$ARTIFACTS/iperf-ack.json" 2>"$ARTIFACTS/iperf-ack.err"; then
+	ACK_LOSS=$(python3 -c "import json;d=json.load(open('$ARTIFACTS/iperf-ack.json'));print(d['end']['sum']['lost_percent'])")
+	log "sub-gate B: application-visible (post-retransmission) loss = ${ACK_LOSS}%"
+	python3 -c "
+import sys
+loss = $ACK_LOSS
+sys.exit(0 if loss < 1.0 else 1)
+" && log "PASS: sub-gate B (${ACK_LOSS}% < 1%)" || fail "sub-gate B: goodput loss ${ACK_LOSS}% >= 1%"
+else
+	fail "sub-gate B: iperf3 UDP flow through the tunnel did not complete"
+	cat "$ARTIFACTS/iperf-ack.err" >&2
+fi
+
+kill "$RELAY_PID" "$CLIENT_PID" "$IPERF_PID" 2>/dev/null || true
+wait "$RELAY_PID" "$CLIENT_PID" "$IPERF_PID" 2>/dev/null || true
+RELAY_PID=""; CLIENT_PID=""; IPERF_PID=""
+bash "$SINGLE_TOPO" down
+
+##########################################################################
+# Sub-gate C: survivability -- TCP transfer completes with zero resets when
 # one of two bonded paths is killed outright partway through.
 ##########################################################################
-log "=== sub-gate B: TCP survives one path dying mid-transfer (two paths) ==="
+log "=== sub-gate C: TCP survives one path dying mid-transfer (two paths) ==="
 bash "$TWO_TOPO" down 2>/dev/null || true
 bash "$TWO_TOPO" up
 
@@ -153,7 +217,7 @@ RELAY_PID=$!
 sleep 1
 RELAY_PUB=$(grep -oE '[A-Za-z0-9+/=]{40,}' "$ARTIFACTS/relay2.log" | head -1)
 if [ -z "$RELAY_PUB" ]; then
-	fail "sub-gate B: relay did not print a public key"
+	fail "sub-gate C: relay did not print a public key"
 	cat "$ARTIFACTS/relay2.log" >&2
 	exit 1
 fi
@@ -166,7 +230,7 @@ ip netns exec bondify-client "$PWD/$BUILD/bondify" \
 CLIENT_PID=$!
 sleep 2
 if ! grep -q "paths=2" "$ARTIFACTS/client2.log"; then
-	fail "sub-gate B: client did not establish both paths"
+	fail "sub-gate C: client did not establish both paths"
 	cat "$ARTIFACTS/client2.log" >&2
 	exit 1
 fi
@@ -175,7 +239,7 @@ ip netns exec bondify-relay iperf3 -s -B 10.77.0.1 -p 5701 >"$ARTIFACTS/iperf-se
 IPERF_PID=$!
 sleep 1
 
-log "sub-gate B: starting a 12s TCP transfer, killing path 1 (v-cli-wan1) 4s in"
+log "sub-gate C: starting a 12s TCP transfer, killing path 1 (v-cli-wan1) 4s in"
 (
 	timeout 20 ip netns exec bondify-client iperf3 -c 10.77.0.1 -p 5701 -t 12 -J \
 		>"$ARTIFACTS/iperf-b.json" 2>"$ARTIFACTS/iperf-b.err"
@@ -189,12 +253,12 @@ ip netns exec bondify-client iptables -A INPUT -i v-cli-wan1 -j DROP
 wait "$IPERF_CLIENT_PID" || true
 
 if [ ! -f "$ARTIFACTS/iperf-b.exit" ] || [ "$(cat "$ARTIFACTS/iperf-b.exit")" -ne 0 ]; then
-	fail "sub-gate B: TCP transfer did not complete after path 1 died"
+	fail "sub-gate C: TCP transfer did not complete after path 1 died"
 	cat "$ARTIFACTS/iperf-b.err" >&2 2>/dev/null || true
 else
 	RETRANSMITS=$(python3 -c "import json;d=json.load(open('$ARTIFACTS/iperf-b.json'));print(d['end']['sum_sent'].get('retransmits','n/a'))" 2>/dev/null || echo "n/a")
 	MBPS=$(python3 -c "import json;d=json.load(open('$ARTIFACTS/iperf-b.json'));print(d['end']['sum_received']['bits_per_second']/1e6)")
-	log "PASS: sub-gate B -- TCP transfer completed on the surviving path (retransmits=${RETRANSMITS}, ${MBPS} Mbps average)"
+	log "PASS: sub-gate C -- TCP transfer completed on the surviving path (retransmits=${RETRANSMITS}, ${MBPS} Mbps average)"
 fi
 
 if [ "$FAIL" -ne 0 ]; then
