@@ -42,9 +42,9 @@ Branch: `agent/ack-sack-retransmission`
 - Senders retain at most 4096 packets / 8 MiB, retry at most three times, and process at
   most 64 retransmissions per maintenance tick.
 - Fast retransmission requires three SACK reports of the same hole, then waits 10 ms on a
-  single path or 250 ms on multipath to absorb expected shaped-queue reordering/FEC
-  recovery; timeout retransmission uses 2× minimum RTT clamped to 100 ms–1 s with the same
-  250 ms multipath floor.
+  single path or 1 s while multiple paths remain ACTIVE to absorb expected shaped-queue
+  reordering/FEC recovery. The multipath floor collapses to the normal 100 ms–1 s RTO as
+  soon as only one path remains ACTIVE.
 - Retransmissions receive a fresh PSN/AEAD nonce, carry `RTX`, and do not rejoin an old FEC
   generation.
 - Unit tests cover cumulative/SACK construction, the GSN-0 boundary, delayed-ACK version
@@ -59,6 +59,9 @@ Branch: `agent/ack-sack-retransmission`
   simplified BBR controller.
 - Queue eviction/retry exhaustion are bounded and observable through counters, but a
   user-facing diagnostic for dropped-unacknowledged packets is still desirable.
+- Healthy multipath uses a conservative 1-second retry floor because cumulative GSN/SACK
+  alone cannot distinguish a lost packet from extreme cross-path skew. Per-path
+  GSN-to-PSN attribution would permit faster multipath recovery without retry feedback.
 
 ## Completed stabilization sprint
 
