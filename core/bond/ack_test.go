@@ -123,12 +123,12 @@ func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
 		HasCumulative: true,
 		CumulativeGSN: 0,
 		SACK:          []AckRange{{Start: 2, End: 3}},
-	})
+	}, now)
 	q.Acknowledge(AckPayload{
 		HasCumulative: true,
 		CumulativeGSN: 0,
 		SACK:          []AckRange{{Start: 2, End: 3}},
-	})
+	}, now)
 	if got := q.Due(now.Add(RetransmitFastDelay), time.Second); len(got) != 0 {
 		t.Fatalf("fast retransmit fired before %d SACK reports: %#v", RetransmitSACKThreshold, got)
 	}
@@ -136,7 +136,7 @@ func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
 		HasCumulative: true,
 		CumulativeGSN: 0,
 		SACK:          []AckRange{{Start: 2, End: 3}},
-	})
+	}, now)
 
 	if got := q.Due(now.Add(RetransmitFastDelay-time.Nanosecond), time.Second); len(got) != 0 {
 		t.Fatalf("fast retransmit fired before grace: %#v", got)
@@ -144,6 +144,24 @@ func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
 	got := q.Due(now.Add(RetransmitFastDelay), time.Second)
 	if len(got) != 1 || got[0].GSN != 1 || got[0].Retries != 1 {
 		t.Fatalf("fast retransmit = %#v, want only GSN 1 retry 1", got)
+	}
+}
+
+func TestFastRetransmitGraceStartsAtSACKThreshold(t *testing.T) {
+	q := newRetransmitQueue()
+	now := time.Unix(1_700_000_000, 0)
+	q.Track(1, []byte{1}, 0, now.Add(-time.Second))
+	ack := AckPayload{SACK: []AckRange{{Start: 2, End: 2}}}
+	for i := 0; i < RetransmitSACKThreshold; i++ {
+		q.Acknowledge(ack, now)
+	}
+
+	if got := q.Due(now.Add(RetransmitFastDelay-time.Nanosecond), 10*time.Second); len(got) != 0 {
+		t.Fatalf("aged original bypassed SACK-time grace: %#v", got)
+	}
+	got := q.Due(now.Add(RetransmitFastDelay), 10*time.Second)
+	if len(got) != 1 || got[0].GSN != 1 {
+		t.Fatalf("fast retransmit at SACK-time grace = %#v, want GSN 1", got)
 	}
 }
 
