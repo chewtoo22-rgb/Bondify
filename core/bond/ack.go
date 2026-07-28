@@ -25,6 +25,7 @@ const (
 	RetransmitTick          = 5 * time.Millisecond
 	RetransmitSACKThreshold = 3
 	RetransmitFastDelay     = 10 * time.Millisecond
+	RetransmitMultiDelay    = 50 * time.Millisecond
 	RetransmitDefaultRTO    = 200 * time.Millisecond
 	RetransmitMinRTO        = 100 * time.Millisecond
 	RetransmitMaxRTO        = time.Second
@@ -191,6 +192,7 @@ type pendingPacket struct {
 	fast     bool
 	sackHits int
 	fastAt   time.Time
+	fastWait time.Duration
 }
 
 // retransmitQueue retains a bounded copy of unacknowledged logical packets.
@@ -278,6 +280,10 @@ func (q *retransmitQueue) Acknowledge(ack AckPayload, now time.Time) {
 				if !pkt.fast {
 					pkt.fast = true
 					pkt.fastAt = now
+					pkt.fastWait = RetransmitFastDelay
+					if len(ack.PathCounters) > 1 {
+						pkt.fastWait = RetransmitMultiDelay
+					}
 				}
 			}
 		}
@@ -322,7 +328,7 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 		delay := rto
 		elapsed := now.Sub(pkt.LastSent)
 		if pkt.fast {
-			delay = RetransmitFastDelay
+			delay = pkt.fastWait
 			elapsed = now.Sub(pkt.fastAt)
 		}
 		if elapsed < delay {
@@ -337,6 +343,7 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 		pkt.fast = false
 		pkt.sackHits = 0
 		pkt.fastAt = time.Time{}
+		pkt.fastWait = 0
 		out = append(out, pendingPacket{
 			GSN:      pkt.GSN,
 			Payload:  append([]byte(nil), pkt.Payload...),
