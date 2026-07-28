@@ -126,9 +126,9 @@ FAST="rate 100mbit delay 15ms"
 SLOW="rate 5mbit delay 200ms loss 1%"
 HOMO="rate 50mbit delay 20ms"
 
-log "=== baseline: fast path (100Mbps/15ms) alone, no bonding ==="
-BASELINE=$(run_bonded round-robin "$FAST" "$FAST" "10.60.0.1" "baseline-fast-alone")
-if [ "$BASELINE" = "UNAVAILABLE" ]; then
+log "=== initial fast-path check (100Mbps/15ms alone, no bonding) ==="
+INITIAL_BASELINE=$(run_bonded round-robin "$FAST" "$FAST" "10.60.0.1" "initial-fast-alone")
+if [ "$INITIAL_BASELINE" = "UNAVAILABLE" ]; then
 	log "WARNING: tc netem unavailable in this kernel; phase 3 gates cannot be meaningfully evaluated here (see script header). Exiting without pass/fail."
 	exit 0
 fi
@@ -137,6 +137,13 @@ log "=== heterogeneous pair (100Mbps/15ms + 5Mbps/200ms/1%loss): benchmark matri
 HETERO_RR=$(run_bonded round-robin "$FAST" "$SLOW" "10.60.0.1,10.61.0.1" "hetero-round-robin")
 HETERO_WG=$(run_bonded weighted-goodput "$FAST" "$SLOW" "10.60.0.1,10.61.0.1" "hetero-weighted-goodput")
 HETERO_MRC=$(run_bonded min-rtt-cwnd "$FAST" "$SLOW" "10.60.0.1,10.61.0.1" "hetero-min-rtt-cwnd")
+
+# Hosted-runner throughput can shift materially during this several-minute matrix even
+# when the packet path is unchanged. Take the acceptance baseline immediately before the
+# HoL sample so CPU allocation changes cannot masquerade as a scheduler regression. Keep
+# the initial sample above as both a netem availability check and a visible drift signal.
+log "=== adjacent baseline: fast path alone immediately before the HoL gate ==="
+BASELINE=$(run_bonded round-robin "$FAST" "$FAST" "10.60.0.1" "adjacent-fast-alone")
 HETERO_HOL=$(run_bonded hol-aware "$FAST" "$SLOW" "10.60.0.1,10.61.0.1" "hetero-hol-aware")
 
 log "=== homogeneous pair (50Mbps/20ms x2): Tier 4 regression check ==="
@@ -145,7 +152,8 @@ HOMO_HOL=$(run_bonded hol-aware "$HOMO" "$HOMO" "10.60.0.1,10.61.0.1" "homo-hol-
 
 log ""
 log "=== benchmark matrix ==="
-log "fast path alone (baseline)      : ${BASELINE} Mbps"
+log "fast path alone (initial)       : ${INITIAL_BASELINE} Mbps"
+log "fast path alone (adjacent gate) : ${BASELINE} Mbps"
 log "hetero round-robin   (Tier 1)   : ${HETERO_RR} Mbps"
 log "hetero weighted-goodput (Tier 2): ${HETERO_WG} Mbps"
 log "hetero min-rtt-cwnd  (Tier 3)   : ${HETERO_MRC} Mbps  (expected to look worst here -- ARCHITECTURE.md §2.1: 'dumps onto the slow path once the fast path's window fills')"
