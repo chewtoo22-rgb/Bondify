@@ -17,17 +17,18 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.net.URI
 import mobile.Tunnel
 import mobile.TunnelBuilder
+
+internal data class RelayEndpoint(val host: String, val port: Int)
 
 /**
  * Bondify's Android VpnService. One instance owns the whole tunnel lifecycle: acquiring a
  * socket per physical uplink (Wi-Fi, cellular), establishing the TUN interface, handing both
  * to the Go core via [mobile.TunnelBuilder]/[mobile.Tunnel], and keeping a foreground
- * notification + wake lock alive so the OS doesn't tear the process down while the screen is
- * off (see ARCHITECTURE.md §9 for what phase 5's 30-minute screen-off gate actually needs
- * and what could and couldn't be verified without a real device in this project's build
- * environment).
+ * notification alive. The app also asks the user for a battery-optimization exemption; the
+ * actual screen-off survival gate still requires a real device (see ARCHITECTURE.md §9).
  *
  * Path acquisition, not TUN setup, is the actual hard part on Android: unlike the Linux CLI
  * client (core/tun/linux.go's DialUDPViaDevice, using SO_BINDTODEVICE), an app has no
@@ -73,6 +74,9 @@ class BondifyVpnService : VpnService() {
     }
     private var wifiCallback: ConnectivityManager.NetworkCallback? = null
     private var cellularCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile
+    private var stopping = false
+    private var connectThread: Thread? = null
     private var runThread: Thread? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -82,6 +86,10 @@ class BondifyVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
+                if (status is TunnelStatus.Connecting || status is TunnelStatus.Connected) {
+                    Log.i(TAG, "ignoring duplicate CONNECT while tunnel is already active")
+                    return START_NOT_STICKY
+                }
                 val relayAddr = intent.getStringExtra(EXTRA_RELAY_ADDR)
                 val relayPubKey = intent.getStringExtra(EXTRA_RELAY_PUBKEY)
                 if (relayAddr.isNullOrBlank() || relayPubKey.isNullOrBlank()) {
@@ -91,15 +99,16 @@ class BondifyVpnService : VpnService() {
                 }
                 startForegroundWithNotification(connecting = true)
                 connect(relayAddr, relayPubKey)
-                return START_STICKY
+                return START_NOT_STICKY
             }
         }
         return START_NOT_STICKY
     }
 
     private fun connect(relayAddr: String, relayPubKeyB64: String) {
+        stopping = false
         status = TunnelStatus.Connecting
-        Thread {
+        connectThread = Thread {
             try {
                 val prefs = getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
                 val clientKeyB64 = Prefs.clientKey(prefs)
@@ -114,9 +123,10 @@ class BondifyVpnService : VpnService() {
                     /* fec = */ true,
                 )
 
-                val (host, _) = splitHostPort(relayAddr)
-                val paths = acquirePaths(builder, host, relayAddr)
-                if (paths == 0) {
+                val endpoint = parseRelayEndpoint(relayAddr)
+                val acquired = acquirePaths(builder, endpoint)
+                checkNotStopping()
+                if (acquired.count == 0) {
                     error("no uplink (Wi-Fi or cellular) became available within ${PATH_WAIT_MS}ms")
                 }
 
@@ -126,6 +136,10 @@ class BondifyVpnService : VpnService() {
                 // handshake completes -- and VpnService.Builder can't be reconfigured after
                 // establish(), so it must be built with the *real* value, not a placeholder.
                 val handshaked = builder.handshake()
+                if (stopping) {
+                    handshaked.close()
+                    return@Thread
+                }
                 if (handshaked.pathErrors.isNotEmpty()) {
                     Log.w(TAG, "some paths failed to join: ${handshaked.pathErrors}")
                 }
@@ -138,18 +152,24 @@ class BondifyVpnService : VpnService() {
                     .addAddress(handshaked.tunnelIP, handshaked.prefix.toInt())
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer("1.1.1.1")
+                    .setUnderlyingNetworks(acquired.networks.toTypedArray())
 
                 val pfd = vpnBuilder.establish()
                     ?: error("VpnService.Builder.establish() returned null (permission revoked mid-flight?)")
+                if (stopping) {
+                    pfd.close()
+                    handshaked.close()
+                    return@Thread
+                }
                 tunFd = pfd
 
                 handshaked.attachTUN(pfd.fd.toLong())
                 tunnel = handshaked
-                status = TunnelStatus.Connected(handshaked.tunnelIP, paths)
+                status = TunnelStatus.Connected(handshaked.tunnelIP, acquired.count)
                 Log.i(
                     TAG,
                     "tunnel established: session=${handshaked.sessionIndexHex} ip=${handshaked.tunnelIP} " +
-                        "prefix=${handshaked.prefix} gw=${handshaked.gatewayIP} mtu=$mtu paths=$paths",
+                        "prefix=${handshaked.prefix} gw=${handshaked.gatewayIP} mtu=$mtu paths=${acquired.count}",
                 )
                 startForegroundWithNotification(connecting = false)
 
@@ -157,43 +177,78 @@ class BondifyVpnService : VpnService() {
                     val err = handshaked.awaitExit()
                     if (err.isNotEmpty()) {
                         Log.e(TAG, "tunnel exited with error: $err")
-                        status = TunnelStatus.Failed(err)
+                        disconnect(TunnelStatus.Failed(err))
                     }
                 }.also { it.start() }
+            } catch (_: InterruptedException) {
+                Log.i(TAG, "connection attempt cancelled")
             } catch (e: Exception) {
+                if (stopping) {
+                    Log.i(TAG, "connection attempt stopped: ${e.message}")
+                    return@Thread
+                }
                 Log.e(TAG, "connect failed", e)
-                status = TunnelStatus.Failed(e.message ?: e.toString())
-                disconnect()
+                disconnect(TunnelStatus.Failed(e.message ?: e.toString()))
             }
-        }.start()
+        }.also {
+            it.name = "bondify-connect"
+            it.start()
+        }
     }
+
+    private data class AcquiredPaths(
+        val count: Int,
+        val networks: List<Network>,
+    )
 
     /**
      * Requests Wi-Fi and cellular networks, and for each that becomes available within
-     * [PATH_WAIT_MS], dials a UDP socket to `relayAddr` on it, binds it to that network,
-     * protects it from the VPN's own capture, and hands its fd to [builder]. Returns how
-     * many paths were successfully added.
+     * [PATH_WAIT_MS], dials a UDP socket to the relay on it, binds it to that network,
+     * protects it from the VPN's own capture, and hands its fd to [builder].
+     *
+     * The callbacks intentionally remain registered after this function returns so Android
+     * keeps the requested physical networks alive. The `accepting` gate prevents a late or
+     * repeated callback from mutating [builder] after its handshake has started. Runtime
+     * path replacement after `onLost` needs a separate Go `AddPath` API and is tracked in
+     * PROJECT_STATUS.md rather than being faked by mutating this one-shot builder.
      */
-    private fun acquirePaths(builder: TunnelBuilder, relayHost: String, relayAddr: String): Int {
-        val (_, port) = splitHostPort(relayAddr)
+    private fun acquirePaths(builder: TunnelBuilder, endpoint: RelayEndpoint): AcquiredPaths {
         var added = 0
         val lock = Object()
+        var accepting = true
+        val addedLabels = mutableSetOf<String>()
+        val networks = mutableListOf<Network>()
 
         fun tryAddPath(network: Network, label: String) {
             synchronized(lock) {
+                if (!accepting || stopping || label in addedLabels) {
+                    return
+                }
+                var detachedFd: Int? = null
                 try {
                     val socket = DatagramSocket()
-                    network.bindSocket(socket)
-                    if (!protect(socket)) {
-                        Log.w(TAG, "protect() failed for $label path")
+                    try {
+                        network.bindSocket(socket)
+                        check(protect(socket)) {
+                            "VpnService.protect() rejected the $label uplink socket"
+                        }
+                        socket.connect(InetSocketAddress(endpoint.host, endpoint.port))
+                        val pfd = ParcelFileDescriptor.fromDatagramSocket(socket)
+                        detachedFd = pfd.detachFd()
+                        val fdForGo = checkNotNull(detachedFd)
+                        detachedFd = null // AddPathFD consumes the descriptor even on error
+                        builder.addPathFD(fdForGo.toLong(), label)
+                    } finally {
+                        socket.close()
                     }
-                    socket.connect(InetSocketAddress(relayHost, port))
-                    val pfd = ParcelFileDescriptor.fromDatagramSocket(socket)
-                    val fd = pfd.detachFd()
-                    builder.addPathFD(fd.toLong(), label)
+                    addedLabels += label
+                    networks += network
                     added++
                     Log.i(TAG, "added path: $label")
                 } catch (e: Exception) {
+                    detachedFd?.let { fd ->
+                        runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
+                    }
                     Log.w(TAG, "could not add $label path: ${e.message}")
                 }
             }
@@ -218,10 +273,27 @@ class BondifyVpnService : VpnService() {
         connectivityManager.requestNetwork(cellularRequest, cellularCallback!!)
 
         Thread.sleep(PATH_WAIT_MS)
-        return added
+        return synchronized(lock) {
+            // If a callback is already adding a path, acquiring this lock waits for it to
+            // finish. No builder mutation can cross this boundary into Handshake().
+            accepting = false
+            AcquiredPaths(added, networks.toList())
+        }
     }
 
-    private fun disconnect() {
+    private fun checkNotStopping() {
+        if (stopping || Thread.currentThread().isInterrupted) {
+            throw InterruptedException("connection attempt cancelled")
+        }
+    }
+
+    private fun disconnect(
+        finalStatus: TunnelStatus = TunnelStatus.Disconnected,
+        stopService: Boolean = true,
+    ) {
+        stopping = true
+        connectThread?.interrupt()
+        connectThread = null
         try {
             tunnel?.close()
         } catch (e: Exception) {
@@ -238,9 +310,11 @@ class BondifyVpnService : VpnService() {
             Log.w(TAG, "error closing tun fd", e)
         }
         tunFd = null
-        status = TunnelStatus.Disconnected
+        status = finalStatus
         stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        if (stopService) {
+            stopSelf()
+        }
     }
 
     override fun onRevoke() {
@@ -251,7 +325,8 @@ class BondifyVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        disconnect()
+        val finalStatus = status.takeIf { it is TunnelStatus.Failed } ?: TunnelStatus.Disconnected
+        disconnect(finalStatus, stopService = false)
         super.onDestroy()
     }
 
@@ -288,10 +363,18 @@ class BondifyVpnService : VpnService() {
     }
 }
 
-private fun splitHostPort(addr: String): Pair<String, Int> {
-    val idx = addr.lastIndexOf(':')
-    require(idx > 0) { "relay address must be host:port, got \"$addr\"" }
-    return addr.substring(0, idx) to addr.substring(idx + 1).toInt()
+internal fun parseRelayEndpoint(addr: String): RelayEndpoint {
+    val uri = runCatching { URI("udp://$addr") }
+        .getOrElse { throw IllegalArgumentException("invalid relay address \"$addr\"", it) }
+    require(!uri.host.isNullOrBlank() && uri.port in 1..65535 && uri.rawUserInfo == null) {
+        "relay address must be host:port or [IPv6]:port, got \"$addr\""
+    }
+    require(uri.path.isNullOrEmpty() && uri.query == null && uri.fragment == null) {
+        "relay address cannot contain a path, query, or fragment"
+    }
+    // java.net.URI retains square brackets around IPv6 literals on some Android/JDK
+    // versions; InetSocketAddress expects the address itself.
+    return RelayEndpoint(uri.host.removePrefix("[").removeSuffix("]"), uri.port)
 }
 
 /** Tiny local-only preference wrapper -- see MainActivity for where the client key is generated. */
