@@ -4,7 +4,7 @@ This is the shared handoff for Matt, Claude, Codex, and future contributors. Upd
 every pull request that changes a phase gate, closes a tracked gap, or discovers a new one.
 The repository and captured test output are authoritative; a chat transcript is not.
 
-Last updated: 2026-07-28
+Last updated: 2026-07-29
 
 ## Naming
 
@@ -52,10 +52,11 @@ Branch: `agent/ack-sack-retransmission`
   packet fast path from regressing back to per-packet slice allocation.
 - Senders retain at most 4096 packets / 8 MiB, retry at most three times, and process at
   most 64 retransmissions per maintenance tick.
-- Fast retransmission requires three SACK reports of the same hole, then waits 10 ms on a
-  single path or 1 s while multiple paths remain ACTIVE to absorb expected shaped-queue
-  reordering/FEC recovery. Timeout recovery uses a conservative 500 ms–1 s RTO and the
-  multipath floor collapses to that normal RTO as soon as only one path remains ACTIVE.
+- Fast retransmission requires three SACK reports of the same hole. It waits 10 ms for a
+  single-path session or when a SACKed successor has the same original path ID as the
+  missing packet; cross-path, mixed, or unavailable attribution keeps a conservative 1 s
+  grace for skew/FEC recovery. Timeout recovery uses a 500 ms–1 s RTO and the multipath
+  floor collapses to that normal RTO as soon as only one path remains ACTIVE.
 - Retransmissions receive a fresh PSN/AEAD nonce, carry `RTX`, and do not rejoin an old FEC
   generation.
 - Unit tests cover cumulative/SACK construction, the GSN-0 boundary, delayed-ACK version
@@ -69,9 +70,9 @@ Branch: `agent/ack-sack-retransmission`
   simplified BBR controller.
 - Queue eviction/retry exhaustion are bounded and observable through counters, but a
   user-facing diagnostic for dropped-unacknowledged packets is still desirable.
-- Healthy multipath uses a conservative 1-second retry floor because cumulative GSN/SACK
-  alone cannot distinguish a lost packet from extreme cross-path skew. Per-path
-  GSN-to-PSN attribution would permit faster multipath recovery without retry feedback.
+- Timeout-only recovery still uses a 1-second multipath floor. A tail loss with no SACKed
+  successor can therefore wait that long; per-original-path ACK delivery timing could
+  shorten that fallback safely.
 
 ## Completed stabilization sprint
 
@@ -217,8 +218,25 @@ Add concise entries here; link the pull request or commit when available.
   before the HoL sample. The HoL threshold remains unchanged.
 - 2026-07-28 - Run 30409751351 proved the adjacent baseline was stable at 88.603 Mbps
   while heterogeneous HoL-aware scheduling reached only 75.847 Mbps despite correctly
-  selecting the fast path. The production cause was packet-fast-path overhead: repeated
-  path-view/tied-set allocations plus a congestion-controller mutex acquisition on every
-  scheduled packet. Path views and scheduler scratch storage are now reused, CWND reads
-  are atomic, and allocation regression tests were added; the network threshold remains
-  unchanged.
+  selecting the fast path. Repeated path-view/tied-set allocations and a
+  congestion-controller mutex were removed from the packet path, CWND reads became atomic,
+  and allocation regression tests were added. Later same-scheduler controls showed this
+  was useful hardening but not the complete throughput diagnosis.
+- 2026-07-29 - Optimization runs caught two correctness regressions before merge: the
+  immutable scheduler view was initially empty after the first-path handshake, and an
+  unmeasured startup RTT tie was incorrectly cached. The view is seeded during handshake,
+  unmeasured classifications are never reused, and race/unit regression tests cover both.
+- 2026-07-29 - Run 30411286782 isolated the remaining Phase 3 failure: one-path
+  round-robin and one-path HoL-aware both reached 88.60 Mbps, while the identical HoL-aware
+  scheduler fell to 75.84 Mbps only after an idle 200 ms path joined. The one-path run
+  recovered roughly 150 dropped outer packets; the multipath run recovered none because a
+  blanket one-second retry grace suppressed same-path fast retransmission.
+- 2026-07-29 - The retransmission queue now retains original path attribution and applies
+  the 10 ms fast grace when the missing packet and SACKed successor share a path, while
+  keeping one second for genuine cross-path/mixed/unknown evidence. GitHub Actions run
+  30411651918 passed race tests, lint, all cross-builds, Android unit/AAR/APK, and every
+  Phase 1–4 network gate. Phase 3 measured 88.607 Mbps heterogeneous HoL-aware versus an
+  88.603 Mbps same-scheduler fast-only control, and 86.080 Mbps homogeneous HoL-aware
+  versus 85.207 Mbps round-robin. Phase 4 measured 0.02712% loss with FEC, 0.86791% with
+  FEC disabled and retransmission enabled, and completed the path-death TCP transfer at
+  184.200 Mbps.
