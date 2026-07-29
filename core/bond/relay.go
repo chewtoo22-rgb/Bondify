@@ -46,7 +46,7 @@ type relaySession struct {
 	paths   map[uint8]*Path
 	// schedPathView is immutable and replaced on path membership changes, avoiding a map
 	// walk and allocation for every return-traffic packet.
-	schedPathView []sched.Path
+	schedPathView atomic.Value // []sched.Path
 
 	sched      sched.Scheduler
 	reorderBuf *reorder.Buffer
@@ -89,6 +89,7 @@ func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnel
 		})
 		rs.fecRecv = newFECGenBuffer()
 	}
+	rs.schedPathView.Store([]sched.Path(nil))
 	return rs
 }
 
@@ -132,18 +133,18 @@ func (rs *relaySession) getOrCreatePath(id uint8, addr *net.UDPAddr) (*Path, boo
 		p = NewPath(id, nil) // relay paths share the listener socket; no dedicated conn
 		p.SetRemoteAddr(addr)
 		rs.paths[id] = p
-		view := make([]sched.Path, len(rs.schedPathView), len(rs.schedPathView)+1)
-		copy(view, rs.schedPathView)
-		rs.schedPathView = append(view, p)
+		current, _ := rs.schedPathView.Load().([]sched.Path)
+		view := make([]sched.Path, len(current), len(current)+1)
+		copy(view, current)
+		rs.schedPathView.Store(append(view, p))
 		return p, true
 	}
 	return p, false
 }
 
 func (rs *relaySession) schedPaths() []sched.Path {
-	rs.pathsMu.RLock()
-	defer rs.pathsMu.RUnlock()
-	return rs.schedPathView
+	view, _ := rs.schedPathView.Load().([]sched.Path)
+	return view
 }
 
 func (rs *relaySession) pathByID(id uint8) *Path {
