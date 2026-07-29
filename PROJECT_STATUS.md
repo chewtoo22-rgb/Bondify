@@ -47,6 +47,9 @@ Branch: `agent/ack-sack-retransmission`
 - A client emits authenticated RTT telemetry after `PROBE_ACK`, letting the relay select
   the correct return path before application traffic. Scheduler RTT reads use a 200 ms
   atomic cache rather than locking and scanning the RTT sample window per packet.
+- Packet scheduling reuses immutable path views and scheduler-owned scratch slices, and
+  reads congestion windows atomically. Tier 3/4 steady-state allocation tests protect the
+  packet fast path from regressing back to per-packet slice allocation.
 - Senders retain at most 4096 packets / 8 MiB, retry at most three times, and process at
   most 64 retransmissions per maintenance tick.
 - Fast retransmission requires three SACK reports of the same hole, then waits 10 ms on a
@@ -212,3 +215,10 @@ Add concise entries here; link the pull request or commit when available.
   75.093 Mbps during the four intervening benchmark scenarios. The harness now retains
   its initial sample as a drift signal and takes the acceptance baseline immediately
   before the HoL sample. The HoL threshold remains unchanged.
+- 2026-07-28 - Run 30409751351 proved the adjacent baseline was stable at 88.603 Mbps
+  while heterogeneous HoL-aware scheduling reached only 75.847 Mbps despite correctly
+  selecting the fast path. The production cause was packet-fast-path overhead: repeated
+  path-view/tied-set allocations plus a congestion-controller mutex acquisition on every
+  scheduled packet. Path views and scheduler scratch storage are now reused, CWND reads
+  are atomic, and allocation regression tests were added; the network threshold remains
+  unchanged.
