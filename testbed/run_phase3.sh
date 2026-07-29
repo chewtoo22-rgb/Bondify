@@ -139,11 +139,13 @@ HETERO_WG=$(run_bonded weighted-goodput "$FAST" "$SLOW" "10.60.0.1,10.61.0.1" "h
 HETERO_MRC=$(run_bonded min-rtt-cwnd "$FAST" "$SLOW" "10.60.0.1,10.61.0.1" "hetero-min-rtt-cwnd")
 
 # Hosted-runner throughput can shift materially during this several-minute matrix even
-# when the packet path is unchanged. Take the acceptance baseline immediately before the
-# HoL sample so CPU allocation changes cannot masquerade as a scheduler regression. Keep
-# the initial sample above as both a netem availability check and a visible drift signal.
+# when the packet path is unchanged. Take adjacent round-robin and HoL-aware one-path
+# controls immediately before the heterogeneous HoL sample. The first catches scheduler
+# overhead; the second isolates whether merely adding a slow path harms the same scheduler.
+# Keep the initial sample above as both a netem availability check and a drift signal.
 log "=== adjacent baseline: fast path alone immediately before the HoL gate ==="
 BASELINE=$(run_bonded round-robin "$FAST" "$FAST" "10.60.0.1" "adjacent-fast-alone")
+HOL_BASELINE=$(run_bonded hol-aware "$FAST" "$FAST" "10.60.0.1" "adjacent-fast-alone-hol-aware")
 HETERO_HOL=$(run_bonded hol-aware "$FAST" "$SLOW" "10.60.0.1,10.61.0.1" "hetero-hol-aware")
 
 log "=== homogeneous pair (50Mbps/20ms x2): Tier 4 regression check ==="
@@ -153,7 +155,8 @@ HOMO_HOL=$(run_bonded hol-aware "$HOMO" "$HOMO" "10.60.0.1,10.61.0.1" "homo-hol-
 log ""
 log "=== benchmark matrix ==="
 log "fast path alone (initial)       : ${INITIAL_BASELINE} Mbps"
-log "fast path alone (adjacent gate) : ${BASELINE} Mbps"
+log "fast path alone (adjacent RR)   : ${BASELINE} Mbps"
+log "fast path alone (adjacent HoL)  : ${HOL_BASELINE} Mbps"
 log "hetero round-robin   (Tier 1)   : ${HETERO_RR} Mbps"
 log "hetero weighted-goodput (Tier 2): ${HETERO_WG} Mbps"
 log "hetero min-rtt-cwnd  (Tier 3)   : ${HETERO_MRC} Mbps  (expected to look worst here -- ARCHITECTURE.md §2.1: 'dumps onto the slow path once the fast path's window fills')"
@@ -168,9 +171,17 @@ TOLERANCE=0.98
 
 python3 -c "
 import sys
-baseline, hetero_hol = $BASELINE, $HETERO_HOL
+baseline, hol_baseline = $BASELINE, $HOL_BASELINE
+ok = hol_baseline >= baseline * 0.97
+print(f'[phase3] Tier 4 one-path regression <= 3%: hol-aware ({hol_baseline:.1f} Mbps) vs round-robin ({baseline:.1f} Mbps) -> {\"PASS\" if ok else \"FAIL\"}')
+sys.exit(0 if ok else 1)
+" || fail "Tier 4 regressed more than 3% vs Tier 1 on the fast path alone"
+
+python3 -c "
+import sys
+baseline, hetero_hol = $HOL_BASELINE, $HETERO_HOL
 ok = hetero_hol >= baseline * $TOLERANCE
-print(f'[phase3] HoL gate: hetero hol-aware ({hetero_hol:.1f} Mbps) vs fast-path-alone ({baseline:.1f} Mbps) -> {\"PASS\" if ok else \"FAIL\"}')
+print(f'[phase3] HoL gate: hetero hol-aware ({hetero_hol:.1f} Mbps) vs same-scheduler fast-path-alone ({baseline:.1f} Mbps) -> {\"PASS\" if ok else \"FAIL\"}')
 sys.exit(0 if ok else 1)
 " || fail "HoL gate: hol-aware underperformed the fast path alone"
 
