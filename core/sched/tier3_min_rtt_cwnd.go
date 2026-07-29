@@ -27,6 +27,10 @@ const unmeasuredRTT = time.Duration(math.MaxInt64)
 const (
 	tieRTTFactor = 1.15
 	tieRTTMin    = 2 * time.Millisecond
+	// RTT/path classification only changes at probe or lifecycle cadence, not per data
+	// packet. Rechecking every 256 selections keeps response time well below the 200 ms
+	// probe interval at ordinary traffic rates without rescanning paths for every packet.
+	schedulerClassifyEvery = 256
 )
 
 // fastestTiedSetInto returns the lowest RTTMin() among paths (unmeasuredRTT if paths is
@@ -86,6 +90,8 @@ type MinRTTCwnd struct {
 	cursor          int
 	scratchEligible []Path
 	scratchPrimary  []Path
+	decisions       int
+	cachedPathCount int
 }
 
 func NewMinRTTCwnd() *MinRTTCwnd { return &MinRTTCwnd{} }
@@ -95,6 +101,24 @@ func (m *MinRTTCwnd) Name() string { return "min-rtt-cwnd" }
 func (m *MinRTTCwnd) Next(paths []Path, size int) Path {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.decisions++
+	if len(m.scratchPrimary) > 0 &&
+		m.cachedPathCount == len(paths) &&
+		m.decisions < schedulerClassifyEvery {
+		n := len(m.scratchPrimary)
+		if m.cursor >= n {
+			m.cursor = 0
+		}
+		for i := 0; i < n; i++ {
+			idx := (m.cursor + i) % n
+			p := m.scratchPrimary[idx]
+			if p.State() == StateActive && p.Role() == RoleBond && p.InFlight() < p.CWND() {
+				m.cursor = (idx + 1) % n
+				return p
+			}
+		}
+	}
 
 	elig := m.scratchEligible[:0]
 	for _, p := range paths {
@@ -108,6 +132,8 @@ func (m *MinRTTCwnd) Next(paths []Path, size int) Path {
 	}
 	_, primary := fastestTiedSetInto(elig, m.scratchPrimary)
 	m.scratchPrimary = primary
+	m.cachedPathCount = len(paths)
+	m.decisions = 0
 	if len(primary) == 0 {
 		return nil
 	}
