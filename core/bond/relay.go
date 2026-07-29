@@ -44,6 +44,9 @@ type relaySession struct {
 
 	pathsMu sync.RWMutex
 	paths   map[uint8]*Path
+	// schedPathView is immutable and replaced on path membership changes, avoiding a map
+	// walk and allocation for every return-traffic packet.
+	schedPathView []sched.Path
 
 	sched      sched.Scheduler
 	reorderBuf *reorder.Buffer
@@ -129,6 +132,9 @@ func (rs *relaySession) getOrCreatePath(id uint8, addr *net.UDPAddr) (*Path, boo
 		p = NewPath(id, nil) // relay paths share the listener socket; no dedicated conn
 		p.SetRemoteAddr(addr)
 		rs.paths[id] = p
+		view := make([]sched.Path, len(rs.schedPathView), len(rs.schedPathView)+1)
+		copy(view, rs.schedPathView)
+		rs.schedPathView = append(view, p)
 		return p, true
 	}
 	return p, false
@@ -137,11 +143,7 @@ func (rs *relaySession) getOrCreatePath(id uint8, addr *net.UDPAddr) (*Path, boo
 func (rs *relaySession) schedPaths() []sched.Path {
 	rs.pathsMu.RLock()
 	defer rs.pathsMu.RUnlock()
-	out := make([]sched.Path, 0, len(rs.paths))
-	for _, p := range rs.paths {
-		out = append(out, p)
-	}
-	return out
+	return rs.schedPathView
 }
 
 func (rs *relaySession) pathByID(id uint8) *Path {
