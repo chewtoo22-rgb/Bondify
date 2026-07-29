@@ -92,6 +92,7 @@ type MinRTTCwnd struct {
 	scratchPrimary  []Path
 	decisions       int
 	cachedPathCount int
+	cacheReady      bool
 }
 
 func NewMinRTTCwnd() *MinRTTCwnd { return &MinRTTCwnd{} }
@@ -103,7 +104,8 @@ func (m *MinRTTCwnd) Next(paths []Path, size int) Path {
 	defer m.mu.Unlock()
 
 	m.decisions++
-	if len(m.scratchPrimary) > 0 &&
+	if m.cacheReady &&
+		len(m.scratchPrimary) > 0 &&
 		m.cachedPathCount == len(paths) &&
 		m.decisions < schedulerClassifyEvery {
 		n := len(m.scratchPrimary)
@@ -130,10 +132,11 @@ func (m *MinRTTCwnd) Next(paths []Path, size int) Path {
 	if len(elig) == 0 {
 		return nil
 	}
-	_, primary := fastestTiedSetInto(elig, m.scratchPrimary)
+	fastestRTT, primary := fastestTiedSetInto(elig, m.scratchPrimary)
 	m.scratchPrimary = primary
 	m.cachedPathCount = len(paths)
 	m.decisions = 0
+	m.cacheReady = fastestRTT < unmeasuredRTT
 	if len(primary) == 0 {
 		return nil
 	}
