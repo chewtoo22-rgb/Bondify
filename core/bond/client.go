@@ -183,17 +183,18 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 	path0.SetActive() // handshake completion is path 0's implicit ack
 
 	t := &ClientTunnel{
-		relayAddr:    raddr,
-		sess:         sess,
-		sessionIndex: respPayload.SessionIndex,
-		tunnelIP:     respPayload.TunnelIP,
-		startedAt:    time.Now(),
-		sched:        scheduler,
-		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
-		ack:          newACKState(),
-		rtx:          newRetransmitQueue(),
-		paths:        []*Path{path0},
-		mode:         cfg.Mode,
+		relayAddr:     raddr,
+		sess:          sess,
+		sessionIndex:  respPayload.SessionIndex,
+		tunnelIP:      respPayload.TunnelIP,
+		startedAt:     time.Now(),
+		sched:         scheduler,
+		reorderBuf:    reorder.New(reorder.DefaultDeadlineMin, 0),
+		ack:           newACKState(),
+		rtx:           newRetransmitQueue(),
+		paths:         []*Path{path0},
+		schedPathView: []sched.Path{path0},
+		mode:          cfg.Mode,
 	}
 	if cfg.FEC {
 		t.fecSend = newFECSender(t.fecLossEstimate, t.sendFECParity)
