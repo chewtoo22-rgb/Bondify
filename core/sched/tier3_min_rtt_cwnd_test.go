@@ -87,6 +87,20 @@ func TestMinRTTBothPathsUnmeasuredRTT(t *testing.T) {
 	}
 }
 
+func TestMinRTTDoesNotCacheUnmeasuredTie(t *testing.T) {
+	fast := &fakePath{id: 0, state: StateActive, role: RoleBond, cwnd: 1 << 20}
+	slow := &fakePath{id: 1, state: StateActive, role: RoleBond, cwnd: 1 << 20}
+	paths := []Path{fast, slow}
+	m := NewMinRTTCwnd()
+	_ = m.Next(paths, 100)
+
+	fast.rttMin = 15 * time.Millisecond
+	slow.rttMin = 200 * time.Millisecond
+	if p := m.Next(paths, 100); p == nil || p.ID() != fast.ID() {
+		t.Fatalf("first measured decision = %v, want fast path %d", p, fast.ID())
+	}
+}
+
 func TestMinRTTEmptySet(t *testing.T) {
 	m := NewMinRTTCwnd()
 	if p := m.Next(nil, 100); p != nil {
