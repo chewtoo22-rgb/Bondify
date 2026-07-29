@@ -103,3 +103,19 @@ func TestMinRTTNoneEligible(t *testing.T) {
 		t.Fatalf("expected nil, got %v", p)
 	}
 }
+
+func TestMinRTTSteadyStateDoesNotAllocate(t *testing.T) {
+	paths := []Path{
+		&fakePath{id: 0, state: StateActive, role: RoleBond, cwnd: 1 << 30, rttMin: 15 * time.Millisecond},
+		&fakePath{id: 1, state: StateActive, role: RoleBond, cwnd: 1 << 30, rttMin: 200 * time.Millisecond},
+	}
+	m := NewMinRTTCwnd()
+	allocs := testing.AllocsPerRun(1000, func() {
+		if p := m.Next(paths, 1400); p == nil {
+			panic("unexpected nil path")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("steady-state Next allocated %v times per packet, want 0", allocs)
+	}
+}
