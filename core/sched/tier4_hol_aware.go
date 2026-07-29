@@ -39,6 +39,7 @@ type HoLAware struct {
 	scratchPrimary  []Path
 	decisions       int
 	cachedPathCount int
+	cacheReady      bool
 }
 
 func NewHoLAware() *HoLAware { return &HoLAware{lambda: holLambdaInit} }
@@ -50,7 +51,8 @@ func (h *HoLAware) Next(paths []Path, size int) Path {
 	defer h.mu.Unlock()
 
 	h.decisions++
-	if len(h.scratchPrimary) > 0 &&
+	if h.cacheReady &&
+		len(h.scratchPrimary) > 0 &&
 		h.cachedPathCount == len(paths) &&
 		h.decisions < schedulerClassifyEvery {
 		if p := h.nextPrimaryWithRoom(); p != nil {
@@ -74,6 +76,7 @@ func (h *HoLAware) Next(paths []Path, size int) Path {
 	h.scratchPrimary = primary
 	h.cachedPathCount = len(paths)
 	h.decisions = 0
+	h.cacheReady = fastestRTT < unmeasuredRTT
 
 	// Round-robin among paths tied for fastest -- no HoL tradeoff to make as long as one
 	// of them has room.
