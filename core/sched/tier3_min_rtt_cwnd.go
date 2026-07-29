@@ -40,6 +40,12 @@ const (
 // has room" path even when paths plainly did have room, and was caught only by a real CI
 // run stalling completely on the relay's always-unmeasured paths.
 func fastestTiedSet(paths []Path) (time.Duration, []Path) {
+	return fastestTiedSetInto(paths, nil)
+}
+
+// fastestTiedSetInto is the allocation-free form used by packet schedulers. Callers keep
+// dst as scheduler-owned scratch storage under their own lock.
+func fastestTiedSetInto(paths, dst []Path) (time.Duration, []Path) {
 	fastest := unmeasuredRTT
 	for _, p := range paths {
 		rtt := p.RTTMin()
@@ -57,7 +63,7 @@ func fastestTiedSet(paths []Path) (time.Duration, []Path) {
 			window = tieRTTMin
 		}
 	}
-	var primary []Path
+	primary := dst[:0]
 	for _, p := range paths {
 		rtt := p.RTTMin()
 		if rtt <= 0 {
@@ -87,8 +93,10 @@ func pathIn(set []Path, p Path) bool {
 // since once the fast path's window fills it dumps straight onto whatever's next-fastest
 // with room, however much slower that is -- exactly the behavior Tier 4 exists to fix.
 type MinRTTCwnd struct {
-	mu     sync.Mutex
-	cursor int
+	mu              sync.Mutex
+	cursor          int
+	scratchEligible []Path
+	scratchPrimary  []Path
 }
 
 func NewMinRTTCwnd() *MinRTTCwnd { return &MinRTTCwnd{} }
@@ -96,17 +104,25 @@ func NewMinRTTCwnd() *MinRTTCwnd { return &MinRTTCwnd{} }
 func (m *MinRTTCwnd) Name() string { return "min-rtt-cwnd" }
 
 func (m *MinRTTCwnd) Next(paths []Path, size int) Path {
-	elig := eligiblePaths(paths)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	elig := m.scratchEligible[:0]
+	for _, p := range paths {
+		if p.State() == StateActive && p.Role() == RoleBond && p.InFlight() < p.CWND() {
+			elig = append(elig, p)
+		}
+	}
+	m.scratchEligible = elig
 	if len(elig) == 0 {
 		return nil
 	}
-	_, primary := fastestTiedSet(elig)
+	_, primary := fastestTiedSetInto(elig, m.scratchPrimary)
+	m.scratchPrimary = primary
 	if len(primary) == 0 {
 		return nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	n := len(primary)
 	if m.cursor >= n {
 		m.cursor = 0
