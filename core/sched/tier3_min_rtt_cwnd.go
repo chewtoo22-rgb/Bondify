@@ -29,22 +29,11 @@ const (
 	tieRTTMin    = 2 * time.Millisecond
 )
 
-// fastestTiedSet returns the lowest RTTMin() among paths (unmeasuredRTT if paths is empty)
-// and every path within the tie window of it. When the fastest sample itself is
-// unmeasuredRTT -- no path in the set has a real RTT sample yet, e.g. every path on the
-// relay side, which never actively probes (see core/bond/path.go's doc comment on the
-// client/relay asymmetry) -- every path is trivially "tied": they're all equally unknown,
-// so all of them belong in the primary set and share load via round robin, exactly like a
-// genuine tie. Returning an empty primary set in that case (an earlier version of this
-// function did) was a real bug: it forced every caller down the "nothing tied-for-fastest
-// has room" path even when paths plainly did have room, and was caught only by a real CI
-// run stalling completely on the relay's always-unmeasured paths.
-func fastestTiedSet(paths []Path) (time.Duration, []Path) {
-	return fastestTiedSetInto(paths, nil)
-}
-
-// fastestTiedSetInto is the allocation-free form used by packet schedulers. Callers keep
-// dst as scheduler-owned scratch storage under their own lock.
+// fastestTiedSetInto returns the lowest RTTMin() among paths (unmeasuredRTT if paths is
+// empty) and appends every path within its tie window to reusable dst. When the fastest
+// sample itself is unmeasuredRTT -- no path in the set has a real RTT sample yet -- every
+// path is trivially tied and shares load via round robin. Callers keep dst as
+// scheduler-owned scratch storage under their own lock.
 func fastestTiedSetInto(paths, dst []Path) (time.Duration, []Path) {
 	fastest := unmeasuredRTT
 	for _, p := range paths {
