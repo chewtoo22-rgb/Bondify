@@ -222,9 +222,11 @@ for the delayed-ACK limit. Further packets above that same gap use the normal 8-
 20 ms cadence, preventing an expected slow multipath packet from creating an ACK storm.
 An unacknowledged GSN becomes eligible for fast retransmission after three ACKs report a
 SACKed successor, preventing ordinary reordering from being mistaken for loss. The grace
-period is 10 ms for a single-path session and 1 s when ACK path counters report multiple
-paths, where normal cross-path reordering is wider; this also lets an in-flight FEC shard
-repair the hole first. Every
+period is 10 ms for a single-path session. In a multipath session, the sender retains the
+original path ID for each pending GSN: a SACKed successor sent on the same path is strong
+loss evidence and also uses 10 ms, while a successor sent on another path keeps a 1 s grace
+for normal cross-path skew. Missing or mixed path attribution is treated conservatively as
+cross-path. These delays also let an in-flight FEC shard repair the hole first. Every
 retransmission uses a fresh path PSN and AEAD nonce and sets `RTX`; it is not inserted back
 into the original FEC generation.
 
