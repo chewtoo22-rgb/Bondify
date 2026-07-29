@@ -209,7 +209,7 @@ func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
 	for gsn := uint64(0); gsn < 4; gsn++ {
-		q.Track(gsn, []byte{byte(gsn)}, 0, now)
+		q.Track(gsn, []byte{byte(gsn)}, 0, 0, true, now)
 	}
 
 	q.Acknowledge(AckPayload{
@@ -243,7 +243,7 @@ func TestRetransmitQueueSelectiveACKAndFastRetransmit(t *testing.T) {
 func TestFastRetransmitGraceStartsAtSACKThreshold(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
-	q.Track(1, []byte{1}, 0, now.Add(-time.Second))
+	q.Track(1, []byte{1}, 0, 0, true, now.Add(-time.Second))
 	ack := AckPayload{SACK: []AckRange{{Start: 2, End: 2}}}
 	for i := 0; i < RetransmitSACKThreshold; i++ {
 		q.Acknowledge(ack, now)
@@ -261,7 +261,8 @@ func TestFastRetransmitGraceStartsAtSACKThreshold(t *testing.T) {
 func TestFastRetransmitAllowsMultipathReordering(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
-	q.Track(1, []byte{1}, 0, now)
+	q.Track(1, []byte{1}, 0, 0, true, now)
+	q.Track(2, []byte{2}, 0, 1, true, now)
 	ack := AckPayload{
 		SACK:         []AckRange{{Start: 2, End: 2}},
 		PathCounters: []AckPathCounter{{PathID: 0}, {PathID: 1}},
@@ -276,6 +277,28 @@ func TestFastRetransmitAllowsMultipathReordering(t *testing.T) {
 	got := q.Due(now.Add(RetransmitMultiDelay), time.Second)
 	if len(got) != 1 || got[0].GSN != 1 {
 		t.Fatalf("multipath fast retransmit = %#v, want GSN 1", got)
+	}
+}
+
+func TestFastRetransmitUsesSamePathEvidenceInMultipathSession(t *testing.T) {
+	q := newRetransmitQueue()
+	now := time.Unix(1_700_000_000, 0)
+	q.Track(1, []byte{1}, 0, 0, true, now)
+	q.Track(2, []byte{2}, 0, 0, true, now)
+	ack := AckPayload{
+		SACK:         []AckRange{{Start: 2, End: 2}},
+		PathCounters: []AckPathCounter{{PathID: 0}, {PathID: 1}},
+	}
+	for i := 0; i < RetransmitSACKThreshold; i++ {
+		q.Acknowledge(ack, now)
+	}
+
+	if got := q.Due(now.Add(RetransmitFastDelay-time.Nanosecond), time.Second); len(got) != 0 {
+		t.Fatalf("same-path retransmit fired before grace: %#v", got)
+	}
+	got := q.Due(now.Add(RetransmitFastDelay), time.Second)
+	if len(got) != 1 || got[0].GSN != 1 {
+		t.Fatalf("same-path fast retransmit = %#v, want GSN 1", got)
 	}
 }
 
@@ -300,7 +323,7 @@ func TestRetransmitRTOMultipathFloor(t *testing.T) {
 func TestRetransmitQueueRetryLimit(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
-	q.Track(7, []byte("packet"), 0, now)
+	q.Track(7, []byte("packet"), 0, 0, true, now)
 
 	for retry := 1; retry <= RetransmitMaxRetries; retry++ {
 		got := q.Due(now.Add(time.Duration(retry)*RetransmitDefaultRTO), RetransmitDefaultRTO)
@@ -320,7 +343,7 @@ func TestRetransmitQueuePacketBound(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
 	for gsn := uint64(0); gsn < RetransmitMaxPackets+10; gsn++ {
-		q.Track(gsn, []byte{1}, 0, now)
+		q.Track(gsn, []byte{1}, 0, 0, true, now)
 	}
 	if len(q.packets) != RetransmitMaxPackets {
 		t.Fatalf("retained packets = %d, want %d", len(q.packets), RetransmitMaxPackets)
@@ -333,7 +356,7 @@ func TestRetransmitQueuePacketBound(t *testing.T) {
 func TestRetransmitQueueStripsPhysicalFlags(t *testing.T) {
 	q := newRetransmitQueue()
 	now := time.Unix(1_700_000_000, 0)
-	q.Track(1, []byte{1}, 0xff, now)
+	q.Track(1, []byte{1}, 0xff, 0, true, now)
 
 	got := q.Due(now.Add(RetransmitDefaultRTO), RetransmitDefaultRTO)
 	if len(got) != 1 {
