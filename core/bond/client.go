@@ -308,6 +308,11 @@ func (t *ClientTunnel) addPath(ctx context.Context, id uint8, spec PathSpec, tim
 	p.SetActive()
 	t.pathsMu.Lock()
 	t.paths = append(t.paths, p)
+	view := make([]sched.Path, len(t.paths))
+	for i, path := range t.paths {
+		view[i] = path
+	}
+	t.schedPathView = view
 	t.pathsMu.Unlock()
 	return nil
 }
@@ -334,6 +339,9 @@ type ClientTunnel struct {
 
 	pathsMu sync.RWMutex
 	paths   []*Path
+	// schedPathView is immutable and replaced whenever a path is added, avoiding two
+	// slice allocations for every packet sent through the scheduler.
+	schedPathView []sched.Path
 
 	pathErrs []error
 
@@ -369,12 +377,9 @@ func (t *ClientTunnel) Paths() []*Path {
 func (t *ClientTunnel) PathErrors() []error { return t.pathErrs }
 
 func (t *ClientTunnel) schedPaths() []sched.Path {
-	paths := t.Paths()
-	out := make([]sched.Path, len(paths))
-	for i, p := range paths {
-		out[i] = p
-	}
-	return out
+	t.pathsMu.RLock()
+	defer t.pathsMu.RUnlock()
+	return t.schedPathView
 }
 
 // Run pumps packets across all paths until ctx is cancelled or a fatal error occurs.
