@@ -352,7 +352,7 @@ func (r *Relay) sendSpeed(sess *relaySession, pkt []byte) {
 	atomic.AddUint64(&r.Stats.TxBytes, uint64(len(pkt)))
 	atomic.AddUint64(&p.Stats.TxPackets, 1)
 	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(pkt)))
-	sess.rtx.Track(gsn, pkt, header.Flags, time.Now())
+	sess.rtx.Track(gsn, pkt, header.Flags, p.id, true, time.Now())
 
 	// See ClientTunnel.sendSpeed's comment: Record (and, on the Kth packet, close and emit
 	// parity for) this generation only after the packet itself is actually on the wire.
@@ -398,7 +398,7 @@ func (r *Relay) sendRedundant(sess *relaySession, pkt []byte) {
 	}
 	atomic.AddUint64(&r.Stats.TxPackets, 1)
 	atomic.AddUint64(&r.Stats.TxBytes, uint64(len(pkt)))
-	sess.rtx.Track(gsn, pkt, 0, time.Now())
+	sess.rtx.Track(gsn, pkt, 0, 0, false, time.Now())
 }
 
 // sendFECParity seals and sends one parity shard for sess on the healthiest currently
