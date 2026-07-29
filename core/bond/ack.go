@@ -232,16 +232,20 @@ func (a *ackState) MarkSent(version uint64, now time.Time) {
 }
 
 type pendingPacket struct {
-	GSN      uint64
-	Payload  []byte
-	Flags    uint8
-	SentAt   time.Time
-	LastSent time.Time
-	Retries  int
-	fast     bool
-	sackHits int
-	fastAt   time.Time
-	fastWait time.Duration
+	GSN               uint64
+	Payload           []byte
+	Flags             uint8
+	OriginalPathID    uint8
+	OriginalPathKnown bool
+	SentAt            time.Time
+	LastSent          time.Time
+	Retries           int
+	fast              bool
+	sackHits          int
+	samePathEvidence  bool
+	crossPathEvidence bool
+	fastAt            time.Time
+	fastWait          time.Duration
 }
 
 // retransmitQueue retains a bounded copy of unacknowledged logical packets.
@@ -257,7 +261,14 @@ func newRetransmitQueue() *retransmitQueue {
 	return &retransmitQueue{packets: make(map[uint64]*pendingPacket)}
 }
 
-func (q *retransmitQueue) Track(gsn uint64, payload []byte, flags uint8, now time.Time) {
+func (q *retransmitQueue) Track(
+	gsn uint64,
+	payload []byte,
+	flags uint8,
+	pathID uint8,
+	pathKnown bool,
+	now time.Time,
+) {
 	cp := append([]byte(nil), payload...)
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -266,11 +277,13 @@ func (q *retransmitQueue) Track(gsn uint64, payload []byte, flags uint8, now tim
 		return
 	}
 	q.packets[gsn] = &pendingPacket{
-		GSN:      gsn,
-		Payload:  cp,
-		Flags:    flags & retransmitSemanticFlags,
-		SentAt:   now,
-		LastSent: now,
+		GSN:               gsn,
+		Payload:           cp,
+		Flags:             flags & retransmitSemanticFlags,
+		OriginalPathID:    pathID,
+		OriginalPathKnown: pathKnown,
+		SentAt:            now,
+		LastSent:          now,
 	}
 	q.order = append(q.order, gsn)
 	q.bytes += len(cp)
@@ -300,12 +313,30 @@ func (q *retransmitQueue) Acknowledge(ack AckPayload, now time.Time) {
 	}
 
 	ranges := validACKRanges(ack.SACK)
+	var successorPath uint8
+	successorPathKnown := false
+	successorPathsMixed := false
 	for gsn := range q.packets {
+		pkt := q.packets[gsn]
 		acked := ack.HasCumulative && gsn <= ack.CumulativeGSN
 		if !acked {
 			acked = inACKRanges(gsn, ranges)
 		}
 		if acked {
+			// Preserve path attribution before deleting a selectively acknowledged
+			// successor. A later packet delivered on the same original path is strong
+			// evidence of loss; one delivered on another path may simply have overtaken
+			// the hole because of cross-path RTT skew.
+			if inACKRanges(gsn, ranges) {
+				if !pkt.OriginalPathKnown {
+					successorPathsMixed = true
+				} else if !successorPathKnown {
+					successorPath = pkt.OriginalPathID
+					successorPathKnown = true
+				} else if successorPath != pkt.OriginalPathID {
+					successorPathsMixed = true
+				}
+			}
 			q.deleteLocked(gsn)
 		}
 	}
@@ -325,12 +356,22 @@ func (q *retransmitQueue) Acknowledge(ack AckPayload, now time.Time) {
 	for gsn, pkt := range q.packets {
 		if gsn < highest {
 			pkt.sackHits++
+			if successorPathKnown {
+				if successorPathsMixed ||
+					!pkt.OriginalPathKnown ||
+					pkt.OriginalPathID != successorPath {
+					pkt.crossPathEvidence = true
+				} else {
+					pkt.samePathEvidence = true
+				}
+			}
 			if pkt.sackHits >= RetransmitSACKThreshold {
 				if !pkt.fast {
 					pkt.fast = true
 					pkt.fastAt = now
 					pkt.fastWait = RetransmitFastDelay
-					if len(ack.PathCounters) > 1 {
+					if len(ack.PathCounters) > 1 &&
+						(!pkt.samePathEvidence || pkt.crossPathEvidence) {
 						pkt.fastWait = RetransmitMultiDelay
 					}
 				}
@@ -393,15 +434,19 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 		pkt.LastSent = now
 		pkt.fast = false
 		pkt.sackHits = 0
+		pkt.samePathEvidence = false
+		pkt.crossPathEvidence = false
 		pkt.fastAt = time.Time{}
 		pkt.fastWait = 0
 		out = append(out, pendingPacket{
-			GSN:      pkt.GSN,
-			Payload:  append([]byte(nil), pkt.Payload...),
-			Flags:    pkt.Flags,
-			SentAt:   pkt.SentAt,
-			LastSent: pkt.LastSent,
-			Retries:  pkt.Retries,
+			GSN:               pkt.GSN,
+			Payload:           append([]byte(nil), pkt.Payload...),
+			Flags:             pkt.Flags,
+			OriginalPathID:    pkt.OriginalPathID,
+			OriginalPathKnown: pkt.OriginalPathKnown,
+			SentAt:            pkt.SentAt,
+			LastSent:          pkt.LastSent,
+			Retries:           pkt.Retries,
 		})
 		if len(out) == RetransmitMaxBatch {
 			break
