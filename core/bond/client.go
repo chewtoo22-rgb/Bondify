@@ -488,7 +488,7 @@ func (t *ClientTunnel) sendSpeed(payload []byte) {
 	atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
 	atomic.AddUint64(&p.Stats.TxPackets, 1)
 	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(payload)))
-	t.rtx.Track(gsn, payload, header.Flags, time.Now())
+	t.rtx.Track(gsn, payload, header.Flags, p.id, true, time.Now())
 
 	// Record (and, on the fec.K-th packet, close and emit parity for) this generation only
 	// after the packet itself is actually on the wire. Doing it earlier let the Kth
@@ -545,7 +545,7 @@ func (t *ClientTunnel) sendRedundant(payload []byte) {
 	// once regardless of how many duplicate copies the receiver's dedup discarded.
 	atomic.AddUint64(&t.Stats.TxPackets, 1)
 	atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
-	t.rtx.Track(gsn, payload, 0, time.Now())
+	t.rtx.Track(gsn, payload, 0, 0, false, time.Now())
 }
 
 // fecLossEstimate is the redundancy input for FEC generations closing on this tunnel: the
