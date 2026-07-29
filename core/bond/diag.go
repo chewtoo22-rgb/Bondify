@@ -46,6 +46,9 @@ type AggregateDiag struct {
 	TxBytes               uint64  `json:"tx_bytes"`
 	RxBytes               uint64  `json:"rx_bytes"`
 	RxErrors              uint64  `json:"rx_errors"`
+	TxAcks                uint64  `json:"tx_acks"`
+	RxAcks                uint64  `json:"rx_acks"`
+	TxRetries             uint64  `json:"tx_retries"`
 	ReorderOccupancyBytes int     `json:"reorder_occupancy_bytes"`
 	ReorderMaxBytes       int     `json:"reorder_max_bytes"`
 	ReorderForcedReleases uint64  `json:"reorder_forced_releases"`
@@ -83,6 +86,9 @@ func (t *ClientTunnel) Diagnostics() SessionDiag {
 			TxBytes:               t.Stats.TxBytes,
 			RxBytes:               t.Stats.RxBytes,
 			RxErrors:              t.Stats.RxErrors,
+			TxAcks:                t.Stats.TxAcks,
+			RxAcks:                t.Stats.RxAcks,
+			TxRetries:             t.Stats.TxRetries,
 			ReorderOccupancyBytes: t.reorderBuf.Occupancy(),
 			ReorderMaxBytes:       t.reorderBuf.MaxBytes(),
 			ReorderForcedReleases: t.reorderBuf.ForcedReleases(),
@@ -127,6 +133,9 @@ func (r *Relay) Diagnostics() RelayDiag {
 				TxBytes:               s.Stats.TxBytes,
 				RxBytes:               s.Stats.RxBytes,
 				RxErrors:              s.Stats.RxErrors,
+				TxAcks:                s.Stats.TxAcks,
+				RxAcks:                s.Stats.RxAcks,
+				TxRetries:             s.Stats.TxRetries,
 				ReorderOccupancyBytes: s.reorderBuf.Occupancy(),
 				ReorderMaxBytes:       s.reorderBuf.MaxBytes(),
 				ReorderForcedReleases: s.reorderBuf.ForcedReleases(),

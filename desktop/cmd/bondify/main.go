@@ -186,8 +186,9 @@ func statsLoop(ctx context.Context, t *bond.ClientTunnel) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			log.Printf("client: tx=%dpkt/%dB rx=%dpkt/%dB rxerr=%d",
-				t.Stats.TxPackets, t.Stats.TxBytes, t.Stats.RxPackets, t.Stats.RxBytes, t.Stats.RxErrors)
+			log.Printf("client: tx=%dpkt/%dB rx=%dpkt/%dB rxerr=%d ack_tx=%d ack_rx=%d rtx=%d",
+				t.Stats.TxPackets, t.Stats.TxBytes, t.Stats.RxPackets, t.Stats.RxBytes, t.Stats.RxErrors,
+				t.Stats.TxAcks, t.Stats.RxAcks, t.Stats.TxRetries)
 			for _, p := range t.Paths() {
 				log.Printf("client:   path %d state=%s tx=%dpkt/%dB rx=%dpkt/%dB rtt_min=%s loss=%.1f%%",
 					p.ID(), p.State(), p.Stats.TxPackets, p.Stats.TxBytes, p.Stats.RxPackets, p.Stats.RxBytes,

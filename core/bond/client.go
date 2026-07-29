@@ -190,9 +190,12 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 		startedAt:    time.Now(),
 		sched:        scheduler,
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
+		ack:          newACKState(),
+		rtx:          newRetransmitQueue(),
 		paths:        []*Path{path0},
 		mode:         cfg.Mode,
 	}
+	t.schedPathView.Store([]sched.Path{path0})
 	if cfg.FEC {
 		t.fecSend = newFECSender(t.fecLossEstimate, t.sendFECParity)
 		t.fecRecv = newFECGenBuffer()
@@ -306,6 +309,11 @@ func (t *ClientTunnel) addPath(ctx context.Context, id uint8, spec PathSpec, tim
 	p.SetActive()
 	t.pathsMu.Lock()
 	t.paths = append(t.paths, p)
+	view := make([]sched.Path, len(t.paths))
+	for i, path := range t.paths {
+		view[i] = path
+	}
+	t.schedPathView.Store(view)
 	t.pathsMu.Unlock()
 	return nil
 }
@@ -322,6 +330,9 @@ type ClientTunnel struct {
 
 	sched      sched.Scheduler
 	reorderBuf *reorder.Buffer
+	ack        *ackState
+	rtx        *retransmitQueue
+	ackSendMu  sync.Mutex
 
 	mode    Mode
 	fecSend *fecSender    // nil when FEC is disabled
@@ -329,6 +340,9 @@ type ClientTunnel struct {
 
 	pathsMu sync.RWMutex
 	paths   []*Path
+	// schedPathView is immutable and replaced whenever a path is added, avoiding two
+	// slice allocations for every packet sent through the scheduler.
+	schedPathView atomic.Value // []sched.Path
 
 	pathErrs []error
 
@@ -345,6 +359,9 @@ type Stats struct {
 	TxBytes   uint64
 	RxBytes   uint64
 	RxErrors  uint64
+	TxAcks    uint64
+	RxAcks    uint64
+	TxRetries uint64
 }
 
 // Paths returns a snapshot of the current path set.
@@ -361,12 +378,8 @@ func (t *ClientTunnel) Paths() []*Path {
 func (t *ClientTunnel) PathErrors() []error { return t.pathErrs }
 
 func (t *ClientTunnel) schedPaths() []sched.Path {
-	paths := t.Paths()
-	out := make([]sched.Path, len(paths))
-	for i, p := range paths {
-		out[i] = p
-	}
-	return out
+	view, _ := t.schedPathView.Load().([]sched.Path)
+	return view
 }
 
 // Run pumps packets across all paths until ctx is cancelled or a fatal error occurs.
@@ -376,9 +389,7 @@ func (t *ClientTunnel) Run(ctx context.Context) error {
 
 	go func() { errCh <- t.tunToNet(ctx) }()
 	go func() { errCh <- t.drainReorderToTun(ctx) }()
-	if t.fecSend != nil || t.fecRecv != nil {
-		go t.fecMaintenanceLoop(ctx)
-	}
+	go t.maintenanceLoop(ctx)
 	for _, p := range paths {
 		p := p
 		go func() { errCh <- t.pathReadLoop(ctx, p) }()
@@ -477,6 +488,7 @@ func (t *ClientTunnel) sendSpeed(payload []byte) {
 	atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
 	atomic.AddUint64(&p.Stats.TxPackets, 1)
 	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(payload)))
+	t.rtx.Track(gsn, payload, header.Flags, p.id, true, time.Now())
 
 	// Record (and, on the fec.K-th packet, close and emit parity for) this generation only
 	// after the packet itself is actually on the wire. Doing it earlier let the Kth
@@ -501,6 +513,7 @@ func (t *ClientTunnel) sendRedundant(payload []byte) {
 		return
 	}
 	gsn := t.sendGSN.Add(1) - 1
+	sent := false
 	for i, p := range paths {
 		psn := p.NextSendPSN()
 		var flags uint8
@@ -522,12 +535,17 @@ func (t *ClientTunnel) sendRedundant(payload []byte) {
 		}
 		atomic.AddUint64(&p.Stats.TxPackets, 1)
 		atomic.AddUint64(&p.Stats.TxBytes, uint64(len(payload)))
+		sent = true
+	}
+	if !sent {
+		return
 	}
 	// Tunnel-wide Stats count the logical packet once, not once per duplicate: it
 	// represents one user packet sent, matching how Stats.RxPackets counts an arrival
 	// once regardless of how many duplicate copies the receiver's dedup discarded.
 	atomic.AddUint64(&t.Stats.TxPackets, 1)
 	atomic.AddUint64(&t.Stats.TxBytes, uint64(len(payload)))
+	t.rtx.Track(gsn, payload, 0, 0, false, time.Now())
 }
 
 // fecLossEstimate is the redundancy input for FEC generations closing on this tunnel: the
@@ -579,17 +597,24 @@ func (t *ClientTunnel) sendFECParity(genID uint16, genIndex, n, m, w int, shard 
 	}
 }
 
-// fecMaintenanceLoop periodically flushes a partial send-side generation that never
-// reached fec.K packets (so it still closes within FECGenTimeout on a quiet tunnel) and
-// evicts stale receive-side generation state. Only started when FEC is enabled.
-func (t *ClientTunnel) fecMaintenanceLoop(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Millisecond)
+// maintenanceLoop drives delayed ACKs, bounded retransmission, partial FEC generation
+// flushes, and receive-side FEC garbage collection.
+func (t *ClientTunnel) maintenanceLoop(ctx context.Context) {
+	ticker := time.NewTicker(RetransmitTick)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+		now := time.Now()
+		t.sendACKIfDue(now)
+		paths := t.Paths()
+		if lowestRTTActivePath(paths) != nil {
+			for _, pkt := range t.rtx.Due(now, retransmitRTO(paths)) {
+				t.retransmit(pkt)
+			}
 		}
 		if t.fecSend != nil {
 			t.fecSend.Flush(FECGenTimeout)
@@ -598,6 +623,59 @@ func (t *ClientTunnel) fecMaintenanceLoop(ctx context.Context) {
 			t.fecRecv.GC(time.Second)
 		}
 	}
+}
+
+func (t *ClientTunnel) sendACKIfDue(now time.Time) {
+	t.ackSendMu.Lock()
+	defer t.ackSendMu.Unlock()
+
+	snapshot, ok := t.ack.SnapshotIfDue(now)
+	if !ok {
+		return
+	}
+	paths := t.Paths()
+	p := lowestRTTActivePath(paths)
+	if p == nil {
+		return
+	}
+	fillACKReceiverState(&snapshot.payload, paths, t.reorderBuf)
+	payload, err := marshalCBOR(snapshot.payload)
+	if err != nil {
+		return
+	}
+	pkt, err := sealControl(t.sess, proto.TypeAck, t.sessionIndex, p.id, payload)
+	if err != nil {
+		return
+	}
+	if _, err := p.conn.Write(pkt); err != nil {
+		return
+	}
+	t.ack.MarkSent(snapshot.version, time.Now())
+	atomic.AddUint64(&t.Stats.TxAcks, 1)
+}
+
+func (t *ClientTunnel) retransmit(pending pendingPacket) {
+	p := lowestRTTActivePath(t.Paths())
+	if p == nil {
+		return
+	}
+	header := proto.InnerDataHeader{
+		GSN:        pending.GSN,
+		PSN:        p.NextSendPSN(),
+		PathID:     p.id,
+		Flags:      pending.Flags | proto.FlagRTX,
+		PayloadLen: uint16(len(pending.Payload)),
+	}
+	pkt, err := sealPacket(t.sess, proto.TypeData, t.sessionIndex, p.id, header, pending.Payload)
+	if err != nil {
+		return
+	}
+	if _, err := p.conn.Write(pkt); err != nil {
+		return
+	}
+	atomic.AddUint64(&t.Stats.TxRetries, 1)
+	atomic.AddUint64(&p.Stats.TxPackets, 1)
+	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(pending.Payload)))
 }
 
 func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
@@ -630,6 +708,8 @@ func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
 			atomic.AddUint64(&p.Stats.RxBytes, uint64(len(payload)))
 			cp := append([]byte(nil), payload...)
 			t.reorderBuf.Push(reorder.Packet{GSN: inner.GSN, Payload: cp, Push: proto.HasFlag(inner.Flags, proto.FlagPUSH)})
+			t.ack.Observe(inner.GSN, time.Now())
+			t.sendACKIfDue(time.Now())
 			if t.fecRecv != nil && proto.HasFlag(inner.Flags, proto.FlagFECProtected) {
 				plain := make([]byte, proto.InnerHeaderLen+len(payload))
 				if err := proto.MarshalInner(plain, inner); err == nil {
@@ -662,7 +742,21 @@ func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
 				atomic.AddUint64(&t.Stats.RxPackets, 1)
 				atomic.AddUint64(&t.Stats.RxBytes, uint64(len(rpayload)))
 				t.reorderBuf.Push(reorder.Packet{GSN: h.GSN, Payload: rpayload, Push: proto.HasFlag(h.Flags, proto.FlagPUSH)})
+				t.ack.Observe(h.GSN, time.Now())
+				t.sendACKIfDue(time.Now())
 			}
+		case proto.TypeAck:
+			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
+			if err != nil {
+				continue
+			}
+			var ack AckPayload
+			if err := unmarshalCBOR(payload, &ack); err != nil {
+				continue
+			}
+			applyACKPathState(ack, t.Paths())
+			t.rtx.Acknowledge(ack, time.Now())
+			atomic.AddUint64(&t.Stats.RxAcks, 1)
 		case proto.TypeProbeAck:
 			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
 			if err != nil {
@@ -672,7 +766,9 @@ func (t *ClientTunnel) pathReadLoop(ctx context.Context, p *Path) error {
 			if err := unmarshalCBOR(payload, &ack); err != nil {
 				continue
 			}
-			p.HandleProbeAck(ack, time.Now())
+			now := time.Now()
+			p.HandleProbeAck(ack, now)
+			t.ack.RequestFeedback(now)
 		case proto.TypeProbe:
 			payload, err := openControl(t.sess, oh, p.id, buf[consumed:n])
 			if err != nil {

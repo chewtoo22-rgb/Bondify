@@ -92,6 +92,20 @@ func TestHoLAwareBothPathsUnmeasuredRTT(t *testing.T) {
 	}
 }
 
+func TestHoLAwareDoesNotCacheUnmeasuredTie(t *testing.T) {
+	fast := &fakePath{id: 0, state: StateActive, role: RoleBond, cwnd: 1 << 20}
+	slow := &fakePath{id: 1, state: StateActive, role: RoleBond, cwnd: 1 << 20}
+	paths := []Path{fast, slow}
+	h := NewHoLAware()
+	_ = h.Next(paths, 100)
+
+	fast.rttMin = 15 * time.Millisecond
+	slow.rttMin = 200 * time.Millisecond
+	if p := h.Next(paths, 100); p == nil || p.ID() != fast.ID() {
+		t.Fatalf("first measured decision = %v, want fast path %d", p, fast.ID())
+	}
+}
+
 func TestHoLAwareLambdaDecayEnablesBorderlineSlowPath(t *testing.T) {
 	h := NewHoLAware()
 
@@ -143,5 +157,21 @@ func TestHoLAwareIgnoresIneligibleRoles(t *testing.T) {
 	h := NewHoLAware()
 	if p := h.Next(paths, 100); p != nil {
 		t.Fatalf("expected nil (no ACTIVE+BOND paths), got %v", p)
+	}
+}
+
+func TestHoLAwareSteadyStateDoesNotAllocate(t *testing.T) {
+	paths := []Path{
+		&fakePath{id: 0, state: StateActive, role: RoleBond, cwnd: 1 << 30, rttMin: 15 * time.Millisecond},
+		&fakePath{id: 1, state: StateActive, role: RoleBond, cwnd: 1 << 30, rttMin: 200 * time.Millisecond},
+	}
+	h := NewHoLAware()
+	allocs := testing.AllocsPerRun(1000, func() {
+		if p := h.Next(paths, 1400); p == nil {
+			panic("unexpected nil path")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("steady-state Next allocated %v times per packet, want 0", allocs)
 	}
 }

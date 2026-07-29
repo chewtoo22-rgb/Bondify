@@ -27,19 +27,18 @@ const unmeasuredRTT = time.Duration(math.MaxInt64)
 const (
 	tieRTTFactor = 1.15
 	tieRTTMin    = 2 * time.Millisecond
+	// RTT/path classification only changes at probe or lifecycle cadence, not per data
+	// packet. Rechecking every 256 selections keeps response time well below the 200 ms
+	// probe interval at ordinary traffic rates without rescanning paths for every packet.
+	schedulerClassifyEvery = 256
 )
 
-// fastestTiedSet returns the lowest RTTMin() among paths (unmeasuredRTT if paths is empty)
-// and every path within the tie window of it. When the fastest sample itself is
-// unmeasuredRTT -- no path in the set has a real RTT sample yet, e.g. every path on the
-// relay side, which never actively probes (see core/bond/path.go's doc comment on the
-// client/relay asymmetry) -- every path is trivially "tied": they're all equally unknown,
-// so all of them belong in the primary set and share load via round robin, exactly like a
-// genuine tie. Returning an empty primary set in that case (an earlier version of this
-// function did) was a real bug: it forced every caller down the "nothing tied-for-fastest
-// has room" path even when paths plainly did have room, and was caught only by a real CI
-// run stalling completely on the relay's always-unmeasured paths.
-func fastestTiedSet(paths []Path) (time.Duration, []Path) {
+// fastestTiedSetInto returns the lowest RTTMin() among paths (unmeasuredRTT if paths is
+// empty) and appends every path within its tie window to reusable dst. When the fastest
+// sample itself is unmeasuredRTT -- no path in the set has a real RTT sample yet -- every
+// path is trivially tied and shares load via round robin. Callers keep dst as
+// scheduler-owned scratch storage under their own lock.
+func fastestTiedSetInto(paths, dst []Path) (time.Duration, []Path) {
 	fastest := unmeasuredRTT
 	for _, p := range paths {
 		rtt := p.RTTMin()
@@ -57,7 +56,7 @@ func fastestTiedSet(paths []Path) (time.Duration, []Path) {
 			window = tieRTTMin
 		}
 	}
-	var primary []Path
+	primary := dst[:0]
 	for _, p := range paths {
 		rtt := p.RTTMin()
 		if rtt <= 0 {
@@ -87,8 +86,13 @@ func pathIn(set []Path, p Path) bool {
 // since once the fast path's window fills it dumps straight onto whatever's next-fastest
 // with room, however much slower that is -- exactly the behavior Tier 4 exists to fix.
 type MinRTTCwnd struct {
-	mu     sync.Mutex
-	cursor int
+	mu              sync.Mutex
+	cursor          int
+	scratchEligible []Path
+	scratchPrimary  []Path
+	decisions       int
+	cachedPathCount int
+	cacheReady      bool
 }
 
 func NewMinRTTCwnd() *MinRTTCwnd { return &MinRTTCwnd{} }
@@ -96,17 +100,47 @@ func NewMinRTTCwnd() *MinRTTCwnd { return &MinRTTCwnd{} }
 func (m *MinRTTCwnd) Name() string { return "min-rtt-cwnd" }
 
 func (m *MinRTTCwnd) Next(paths []Path, size int) Path {
-	elig := eligiblePaths(paths)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.decisions++
+	if m.cacheReady &&
+		len(m.scratchPrimary) > 0 &&
+		m.cachedPathCount == len(paths) &&
+		m.decisions < schedulerClassifyEvery {
+		n := len(m.scratchPrimary)
+		if m.cursor >= n {
+			m.cursor = 0
+		}
+		for i := 0; i < n; i++ {
+			idx := (m.cursor + i) % n
+			p := m.scratchPrimary[idx]
+			if p.State() == StateActive && p.Role() == RoleBond && p.InFlight() < p.CWND() {
+				m.cursor = (idx + 1) % n
+				return p
+			}
+		}
+	}
+
+	elig := m.scratchEligible[:0]
+	for _, p := range paths {
+		if p.State() == StateActive && p.Role() == RoleBond && p.InFlight() < p.CWND() {
+			elig = append(elig, p)
+		}
+	}
+	m.scratchEligible = elig
 	if len(elig) == 0 {
 		return nil
 	}
-	_, primary := fastestTiedSet(elig)
+	fastestRTT, primary := fastestTiedSetInto(elig, m.scratchPrimary)
+	m.scratchPrimary = primary
+	m.cachedPathCount = len(paths)
+	m.decisions = 0
+	m.cacheReady = fastestRTT < unmeasuredRTT
 	if len(primary) == 0 {
 		return nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	n := len(primary)
 	if m.cursor >= n {
 		m.cursor = 0

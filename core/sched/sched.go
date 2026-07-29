@@ -115,18 +115,6 @@ func eligiblePaths(paths []Path) []Path {
 	return out
 }
 
-// activeBondPaths returns every ACTIVE BOND-role path regardless of congestion window --
-// Tier 4 needs this wider set to reason about a path that's currently full.
-func activeBondPaths(paths []Path) []Path {
-	out := make([]Path, 0, len(paths))
-	for _, p := range paths {
-		if p.State() == StateActive && p.Role() == RoleBond {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
 // RoundRobin is Tier 1: ARCHITECTURE.md §2.1's baseline. Cycles through paths in a fixed
 // rotation, skipping any that aren't ACTIVE+BOND+within-window. Never removed even once
 // later tiers exist — it's the mode that wins under small receive buffers, and the

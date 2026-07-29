@@ -284,22 +284,27 @@ reporting, no account, no default relay logging; reproducible builds.
   shared output stream. See `core/sched/tier2_weighted_goodput.go`'s doc comment.
 - **`core/cc`'s congestion control is a simplified BBR, not the full phase-cycling state
   machine.** Real BBR cycles `pacing_gain` through STARTUP/DRAIN/PROBE_BW/PROBE_RTT phases,
-  driven by a per-RTT (often per-ACK) delivery-rate sample. BOND/1 has no per-packet ACK
-  yet — only periodic `PROBE`/`PROBE_ACK` round trips (`ProbeInterval` = 200ms) — so there
-  is no per-RTT signal to cycle a gain schedule against. `core/cc.Controller` uses a single
+  driven by a per-RTT (often per-ACK) delivery-rate sample. BOND/1 now carries per-packet
+  ACK/SACK feedback, but `core/cc.Controller` is still fed by the older periodic
+  `PROBE`/`PROBE_ACK` samples (`ProbeInterval` = 200ms); the ACK path has not yet been
+  promoted into a full BBR delivery-rate sampler. `core/cc.Controller` uses a single
   fixed gain (2.0, matching the spec's formula) over a windowed max-filtered delivery-rate
   estimate instead, which captures the core formula (`cwnd = btl_bw * rt_prop * gain`) and
   the core self-correcting property (a stalled path's rate ages out of the window and its
-  cwnd shrinks) without the full phase state machine. Revisit once phase 4's per-packet ACKs
-  land. See `core/cc/cc.go`'s package doc comment.
-- **`core/cc.Controller` only receives real samples on the client side.** It's fed from
+  cwnd shrinks) without the full phase state machine. Revisit when ACK timing and
+  per-original-path delivery accounting are wired into congestion control. See
+  `core/cc/cc.go`'s package doc comment.
+- **`core/cc.Controller` only receives real delivery-rate samples on the client side.**
+  It's fed from
   `HandleProbeAck`'s existing PSN-delta bookkeeping (already used for loss, extended to also
   track bytes sent since the last probe), and only the client runs the probe-driven state
   machine at all (see this file's existing note on that asymmetry, above `core/bond/path.go`
-  in the repo). A relay-side path's `CWND()` therefore stays at `core/cc`'s generous initial
-  value rather than adapting — acceptable for now since it only under-constrains the relay's
-  own return-traffic scheduling, never the client's. Symmetric relay-initiated probing
-  (already flagged as future work) would close this gap.
+  in the repo). Authenticated ACK telemetry now carries the client's per-path minimum RTT,
+  so the relay can distinguish fast and slow paths for return-traffic scheduling even
+  without initiating probes itself. A relay-side path's `CWND()` still stays at `core/cc`'s
+  generous initial value rather than adapting — acceptable for now since it only
+  under-constrains the relay's own return-traffic scheduling, never the client's. Symmetric
+  relay-initiated probing or per-original-path ACK timing would close the remaining gap.
 - **Fixed two real bugs in Tier 3/4's fastest-path tie-breaking, found by a real CI run, not
   code inspection.** First: a homogeneous two-path CI run showed `hol-aware` at roughly half
   of `round-robin`'s throughput. Root cause: a strict single-winner RTT comparison let one
@@ -309,9 +314,10 @@ reporting, no account, no default relay logging; reproducible builds.
   it anything to prove itself against. Fixed by having `fastestTiedSet` treat paths within a
   small RTT tolerance as tied and round-robin among them (`core/sched/tier3_min_rtt_cwnd.go`
   and `tier4_hol_aware.go`), which also fixes the identical latent issue in Tier 3.
-  Second, surfaced immediately by the first fix: the relay side never actively probes (see
-  the asymmetry entry above), so relay-side paths' `RTTMin()` is always the unmeasured
-  sentinel — `fastestTiedSet` returned an *empty* tied set in that case, and the fallback
+  Second, surfaced immediately by the first fix: before authenticated RTT feedback was
+  added, the relay side never actively probed, so relay-side paths' `RTTMin()` began at the
+  unmeasured sentinel — `fastestTiedSet` returned an *empty* tied set in that case, and the
+  fallback
   path's own tie-breaking (`rtt < slowRTT` starting from the same sentinel) meant a
   candidate whose RTT was itself the sentinel could never win either. Together these made
   the relay-side scheduler return `nil` forever, and a real two-path tunnel's return traffic
@@ -321,6 +327,18 @@ reporting, no account, no default relay logging; reproducible builds.
   without them (`TestHoLAwareSharesLoadAcrossEquallyFastPaths`,
   `TestHoLAwareBothPathsUnmeasuredRTT`, and their Tier 3 equivalents) and were re-verified
   against real running relay+client binaries in the netns rig after the fix.
+- **Fixed blanket multipath retry suppression that penalized an otherwise idle slow
+  path.** The first ACK/SACK implementation gave every hole a one-second grace whenever
+  the receiver reported more than one path. That safely absorbed cross-path skew, but it
+  also suppressed fast recovery when HoL-aware scheduling put every data packet on one
+  fast path and a much slower second path carried probes only. The Phase 3 matrix exposed
+  the result: correct path selection and zero retries, but only 75.84 Mbps against an
+  88.60 Mbps same-scheduler one-path control. The retransmission queue now retains each
+  pending GSN's original path ID. A SACKed successor from that same path permits the 10 ms
+  fast grace; a successor from another path, mixed attribution, or no attribution keeps
+  the conservative one-second grace. Separate unit tests protect both decisions. CI run
+  30411651918 restored heterogeneous HoL-aware throughput to 88.61 Mbps without weakening
+  the FEC, FEC-off loss, or path-death gates.
 - **Fixed a real duplicate-delivery bug in the reorder buffer, found by REDUNDANT mode.**
   `Buffer.Push`'s duplicate check only compared an arriving GSN against `nextExpected`,
   which is sufficient when every GSN can only ever arrive once (SPEED mode: AEAD's per-path

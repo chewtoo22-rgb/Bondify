@@ -44,9 +44,15 @@ type relaySession struct {
 
 	pathsMu sync.RWMutex
 	paths   map[uint8]*Path
+	// schedPathView is immutable and replaced on path membership changes, avoiding a map
+	// walk and allocation for every return-traffic packet.
+	schedPathView atomic.Value // []sched.Path
 
 	sched      sched.Scheduler
 	reorderBuf *reorder.Buffer
+	ack        *ackState
+	rtx        *retransmitQueue
+	ackSendMu  sync.Mutex
 
 	mode    Mode
 	fecSend *fecSender    // nil when FEC is disabled
@@ -73,6 +79,8 @@ func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnel
 		paths:        make(map[uint8]*Path),
 		sched:        scheduler,
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
+		ack:          newACKState(),
+		rtx:          newRetransmitQueue(),
 		mode:         cfg.Mode,
 	}
 	if cfg.FEC {
@@ -81,6 +89,7 @@ func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnel
 		})
 		rs.fecRecv = newFECGenBuffer()
 	}
+	rs.schedPathView.Store([]sched.Path(nil))
 	return rs
 }
 
@@ -124,19 +133,18 @@ func (rs *relaySession) getOrCreatePath(id uint8, addr *net.UDPAddr) (*Path, boo
 		p = NewPath(id, nil) // relay paths share the listener socket; no dedicated conn
 		p.SetRemoteAddr(addr)
 		rs.paths[id] = p
+		current, _ := rs.schedPathView.Load().([]sched.Path)
+		view := make([]sched.Path, len(current), len(current)+1)
+		copy(view, current)
+		rs.schedPathView.Store(append(view, p))
 		return p, true
 	}
 	return p, false
 }
 
 func (rs *relaySession) schedPaths() []sched.Path {
-	rs.pathsMu.RLock()
-	defer rs.pathsMu.RUnlock()
-	out := make([]sched.Path, 0, len(rs.paths))
-	for _, p := range rs.paths {
-		out = append(out, p)
-	}
-	return out
+	view, _ := rs.schedPathView.Load().([]sched.Path)
+	return view
 }
 
 func (rs *relaySession) pathByID(id uint8) *Path {
@@ -344,6 +352,7 @@ func (r *Relay) sendSpeed(sess *relaySession, pkt []byte) {
 	atomic.AddUint64(&r.Stats.TxBytes, uint64(len(pkt)))
 	atomic.AddUint64(&p.Stats.TxPackets, 1)
 	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(pkt)))
+	sess.rtx.Track(gsn, pkt, header.Flags, p.id, true, time.Now())
 
 	// See ClientTunnel.sendSpeed's comment: Record (and, on the Kth packet, close and emit
 	// parity for) this generation only after the packet itself is actually on the wire.
@@ -360,6 +369,7 @@ func (r *Relay) sendRedundant(sess *relaySession, pkt []byte) {
 		return
 	}
 	gsn := sess.sendGSN.Add(1) - 1
+	sent := false
 	for i, p := range paths {
 		addr := p.RemoteAddr()
 		if addr == nil {
@@ -381,9 +391,14 @@ func (r *Relay) sendRedundant(sess *relaySession, pkt []byte) {
 		}
 		atomic.AddUint64(&p.Stats.TxPackets, 1)
 		atomic.AddUint64(&p.Stats.TxBytes, uint64(len(pkt)))
+		sent = true
+	}
+	if !sent {
+		return
 	}
 	atomic.AddUint64(&r.Stats.TxPackets, 1)
 	atomic.AddUint64(&r.Stats.TxBytes, uint64(len(pkt)))
+	sess.rtx.Track(gsn, pkt, 0, 0, false, time.Now())
 }
 
 // sendFECParity seals and sends one parity shard for sess on the healthiest currently
@@ -417,13 +432,11 @@ func (r *Relay) sendFECParity(sess *relaySession, genID uint16, genIndex, n, m, 
 	_, _ = r.conn.WriteToUDP(out, addr)
 }
 
-// FECMaintenanceLoop periodically flushes partial send-side generations and evicts stale
-// receive-side generation state, across every session that has FEC enabled. Mirrors
-// ClientTunnel's internal fecMaintenanceLoop; the relay runs one shared loop for all
-// sessions since, unlike the client, it doesn't already have one goroutine per session.
+// FECMaintenanceLoop is the relay's shared session maintenance loop. The historical name
+// remains for API compatibility; it now drives ACKs and retransmission as well as FEC.
 // Exported: cmd/bondify-relay starts it alongside ServeUDP/ServeTUN/ServeReorder.
 func (r *Relay) FECMaintenanceLoop(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(RetransmitTick)
 	defer ticker.Stop()
 	for {
 		select {
@@ -438,6 +451,14 @@ func (r *Relay) FECMaintenanceLoop(ctx context.Context) {
 		}
 		r.mu.RUnlock()
 		for _, s := range sessions {
+			now := time.Now()
+			r.sendACKIfDue(s, now)
+			paths := s.pathSlice()
+			if lowestRTTActivePath(paths) != nil {
+				for _, pkt := range s.rtx.Due(now, retransmitRTO(paths)) {
+					r.retransmit(s, pkt)
+				}
+			}
 			if s.fecSend != nil {
 				s.fecSend.Flush(FECGenTimeout)
 			}
@@ -446,6 +467,69 @@ func (r *Relay) FECMaintenanceLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (r *Relay) sendACKIfDue(sess *relaySession, now time.Time) {
+	sess.ackSendMu.Lock()
+	defer sess.ackSendMu.Unlock()
+
+	snapshot, ok := sess.ack.SnapshotIfDue(now)
+	if !ok {
+		return
+	}
+	paths := sess.pathSlice()
+	p := lowestRTTActivePath(paths)
+	if p == nil {
+		return
+	}
+	addr := p.RemoteAddr()
+	if addr == nil {
+		return
+	}
+	fillACKReceiverState(&snapshot.payload, paths, sess.reorderBuf)
+	payload, err := marshalCBOR(snapshot.payload)
+	if err != nil {
+		return
+	}
+	pkt, err := sealControl(sess.sess, proto.TypeAck, sess.sessionIndex, p.id, payload)
+	if err != nil {
+		return
+	}
+	if _, err := r.conn.WriteToUDP(pkt, addr); err != nil {
+		return
+	}
+	sess.ack.MarkSent(snapshot.version, time.Now())
+	atomic.AddUint64(&sess.Stats.TxAcks, 1)
+	atomic.AddUint64(&r.Stats.TxAcks, 1)
+}
+
+func (r *Relay) retransmit(sess *relaySession, pending pendingPacket) {
+	p := lowestRTTActivePath(sess.pathSlice())
+	if p == nil {
+		return
+	}
+	addr := p.RemoteAddr()
+	if addr == nil {
+		return
+	}
+	header := proto.InnerDataHeader{
+		GSN:        pending.GSN,
+		PSN:        p.NextSendPSN(),
+		PathID:     p.id,
+		Flags:      pending.Flags | proto.FlagRTX,
+		PayloadLen: uint16(len(pending.Payload)),
+	}
+	out, err := sealPacket(sess.sess, proto.TypeData, sess.sessionIndex, p.id, header, pending.Payload)
+	if err != nil {
+		return
+	}
+	if _, err := r.conn.WriteToUDP(out, addr); err != nil {
+		return
+	}
+	atomic.AddUint64(&sess.Stats.TxRetries, 1)
+	atomic.AddUint64(&r.Stats.TxRetries, 1)
+	atomic.AddUint64(&p.Stats.TxPackets, 1)
+	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(pending.Payload)))
 }
 
 // ServeReorder drains every session's reorder buffer to the shared TUN device. Run as its
@@ -497,6 +581,8 @@ func (r *Relay) handleUDP(buf []byte, src *net.UDPAddr) {
 		r.handleData(oh, buf[consumed:], src)
 	case proto.TypeFEC:
 		r.handleFEC(oh, buf[consumed:], src)
+	case proto.TypeAck:
+		r.handleACK(oh, buf[consumed:])
 	case proto.TypePathAdd:
 		r.handlePathAdd(oh, buf[consumed:], src)
 	case proto.TypeProbe:
@@ -729,6 +815,8 @@ func (r *Relay) handleData(oh proto.OuterHeader, ciphertext []byte, src *net.UDP
 
 	cp := append([]byte(nil), payload...)
 	sess.reorderBuf.Push(reorder.Packet{GSN: inner.GSN, Payload: cp, Push: proto.HasFlag(inner.Flags, proto.FlagPUSH)})
+	sess.ack.Observe(inner.GSN, time.Now())
+	r.sendACKIfDue(sess, time.Now())
 
 	if sess.fecRecv != nil && proto.HasFlag(inner.Flags, proto.FlagFECProtected) {
 		plain := make([]byte, proto.InnerHeaderLen+len(payload))
@@ -786,7 +874,34 @@ func (r *Relay) handleFEC(oh proto.OuterHeader, ciphertext []byte, src *net.UDPA
 		atomic.AddUint64(&r.Stats.RxPackets, 1)
 		atomic.AddUint64(&r.Stats.RxBytes, uint64(len(rpayload)))
 		sess.reorderBuf.Push(reorder.Packet{GSN: h.GSN, Payload: rpayload, Push: proto.HasFlag(h.Flags, proto.FlagPUSH)})
+		sess.ack.Observe(h.GSN, time.Now())
+		r.sendACKIfDue(sess, time.Now())
 	}
+}
+
+func (r *Relay) handleACK(oh proto.OuterHeader, ciphertext []byte) {
+	r.mu.RLock()
+	sess := r.byIndex[oh.SessionIndex]
+	r.mu.RUnlock()
+	if sess == nil {
+		return
+	}
+	pathID := ciphertext0PathIDHint(oh)
+	if sess.pathByID(pathID) == nil {
+		return
+	}
+	payload, err := openControl(sess.sess, oh, pathID, ciphertext)
+	if err != nil {
+		return
+	}
+	var ack AckPayload
+	if err := unmarshalCBOR(payload, &ack); err != nil {
+		return
+	}
+	applyACKPathState(ack, sess.pathSlice())
+	sess.rtx.Acknowledge(ack, time.Now())
+	atomic.AddUint64(&sess.Stats.RxAcks, 1)
+	atomic.AddUint64(&r.Stats.RxAcks, 1)
 }
 
 func (r *Relay) newSessionIndex() uint32 {

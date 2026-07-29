@@ -32,9 +32,14 @@ const (
 // choosing to wait rather than let one hopelessly slow path stall reassembly of everything
 // behind it.
 type HoLAware struct {
-	mu     sync.Mutex
-	lambda float64
-	cursor int
+	mu              sync.Mutex
+	lambda          float64
+	cursor          int
+	scratchBond     []Path
+	scratchPrimary  []Path
+	decisions       int
+	cachedPathCount int
+	cacheReady      bool
 }
 
 func NewHoLAware() *HoLAware { return &HoLAware{lambda: holLambdaInit} }
@@ -42,35 +47,42 @@ func NewHoLAware() *HoLAware { return &HoLAware{lambda: holLambdaInit} }
 func (h *HoLAware) Name() string { return "hol-aware" }
 
 func (h *HoLAware) Next(paths []Path, size int) Path {
-	bond := activeBondPaths(paths)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.decisions++
+	if h.cacheReady &&
+		len(h.scratchPrimary) > 0 &&
+		h.cachedPathCount == len(paths) &&
+		h.decisions < schedulerClassifyEvery {
+		if p := h.nextPrimaryWithRoom(); p != nil {
+			h.decay()
+			return p
+		}
+	}
+
+	bond := h.scratchBond[:0]
+	for _, p := range paths {
+		if p.State() == StateActive && p.Role() == RoleBond {
+			bond = append(bond, p)
+		}
+	}
+	h.scratchBond = bond
 	if len(bond) == 0 {
 		return nil
 	}
 
-	fastestRTT, primary := fastestTiedSet(bond)
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	fastestRTT, primary := fastestTiedSetInto(bond, h.scratchPrimary)
+	h.scratchPrimary = primary
+	h.cachedPathCount = len(paths)
+	h.decisions = 0
+	h.cacheReady = fastestRTT < unmeasuredRTT
 
 	// Round-robin among paths tied for fastest -- no HoL tradeoff to make as long as one
 	// of them has room.
-	n := len(primary)
-	if n > 0 {
-		if h.cursor >= n {
-			h.cursor = 0
-		}
-		for i := 0; i < n; i++ {
-			idx := (h.cursor + i) % n
-			p := primary[idx]
-			if p.InFlight() < p.CWND() {
-				h.cursor = idx + 1
-				if h.cursor >= n {
-					h.cursor = 0
-				}
-				h.decay()
-				return p
-			}
-		}
+	if p := h.nextPrimaryWithRoom(); p != nil {
+		h.decay()
+		return p
 	}
 
 	// Nothing tied-for-fastest has room. Find the fastest genuinely-slower alternative
@@ -123,6 +135,26 @@ func (h *HoLAware) Next(paths []Path, size int) Path {
 		return slow
 	}
 	h.raise()
+	return nil
+}
+
+// nextPrimaryWithRoom assumes h.mu is held.
+func (h *HoLAware) nextPrimaryWithRoom() Path {
+	n := len(h.scratchPrimary)
+	if n == 0 {
+		return nil
+	}
+	if h.cursor >= n {
+		h.cursor = 0
+	}
+	for i := 0; i < n; i++ {
+		idx := (h.cursor + i) % n
+		p := h.scratchPrimary[idx]
+		if p.State() == StateActive && p.Role() == RoleBond && p.InFlight() < p.CWND() {
+			h.cursor = (idx + 1) % n
+			return p
+		}
+	}
 	return nil
 }
 
