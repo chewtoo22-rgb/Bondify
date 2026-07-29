@@ -199,15 +199,16 @@ running relay+client binaries in the two-path netns rig:
 
 The CI runner's real `tc netem` matrix now verifies the required asymmetric case
 (100Mbps/15ms fast vs 5Mbps/200ms/1% loss slow) and homogeneous 2×50Mbps comparison.
-On run 30409215021, HoL-aware scheduling delivered 88.90 Mbps against an 88.61 Mbps
-fast-path baseline; on homogeneous paths it delivered 84.69 Mbps against round-robin's
-84.69 Mbps. Per-path counters confirmed the heterogeneous HoL run put all measured data
-on the fast path. The gate takes a fresh fast-only baseline immediately before the
-HoL-aware sample, while retaining an initial sample to reveal hosted-runner drift. The
-local harness still skips this gate when the host kernel lacks the required qdisc modules
-instead of fabricating a pass. Tier 3/4 reuse immutable path views and scheduler-owned
-scratch storage and read congestion windows atomically, keeping the per-packet selection
-path allocation-free after warm-up.
+On run 30411651918, HoL-aware scheduling delivered 88.61 Mbps against an 88.60 Mbps
+same-scheduler fast-path control; on homogeneous paths it delivered 86.08 Mbps against
+round-robin's 85.21 Mbps. Per-path counters confirmed the heterogeneous HoL run put all
+measured data on the fast path. The gate takes adjacent round-robin and HoL-aware
+fast-only controls immediately before the heterogeneous sample: one catches scheduler
+overhead, while the other isolates the effect of adding a slow path. It retains an initial
+sample to reveal hosted-runner drift. The local harness still skips this gate when the
+host kernel lacks the required qdisc modules instead of fabricating a pass. Tier 3/4 reuse
+immutable path views and scheduler-owned scratch storage and read congestion windows
+atomically, keeping the per-packet selection path allocation-free after warm-up.
 
 Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link) is not yet
 implemented. BOND/1 ACK/SACK packets and bounded ACK-driven retransmission are implemented
@@ -226,9 +227,13 @@ support this separate loss-injection facility):
   FEC-disabled ACK/SACK retransmission under the same loss, and TCP survival when one of
   two paths dies during a transfer. All three are CI-fatal. Verified runs held
   application-visible loss below 1% with FEC both enabled and disabled, and completed the
-  path-death transfer on the surviving path without a connection reset. Run 30409215021
-  measured 0.0407% loss with FEC, 0.8476% with FEC disabled and retransmission enabled,
-  and completed the path-death TCP transfer at 213.7 Mbps.
+  path-death transfer on the surviving path without a connection reset. Run 30411651918
+  measured 0.0271% loss with FEC, 0.8679% with FEC disabled and retransmission enabled,
+  and completed the path-death TCP transfer at 184.2 Mbps.
+- Retransmission retains each logical packet's original path ID. A SACKed successor from
+  the same path permits the 10 ms fast-retry grace even when other paths are active; a
+  successor from another path keeps the conservative 1-second grace for legitimate
+  cross-path skew. Unit tests cover both decisions.
 - REDUNDANT mode verified directly via the live diagnostics endpoint on a real two-path
   run: both paths carried byte-for-byte identical TX counts (duplicated traffic, as
   designed) while `reorder_occupancy_bytes` stayed at 0 and `reorder_forced_releases` at 0
