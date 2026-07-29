@@ -32,9 +32,11 @@ const (
 // choosing to wait rather than let one hopelessly slow path stall reassembly of everything
 // behind it.
 type HoLAware struct {
-	mu     sync.Mutex
-	lambda float64
-	cursor int
+	mu             sync.Mutex
+	lambda         float64
+	cursor         int
+	scratchBond    []Path
+	scratchPrimary []Path
 }
 
 func NewHoLAware() *HoLAware { return &HoLAware{lambda: holLambdaInit} }
@@ -42,15 +44,22 @@ func NewHoLAware() *HoLAware { return &HoLAware{lambda: holLambdaInit} }
 func (h *HoLAware) Name() string { return "hol-aware" }
 
 func (h *HoLAware) Next(paths []Path, size int) Path {
-	bond := activeBondPaths(paths)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	bond := h.scratchBond[:0]
+	for _, p := range paths {
+		if p.State() == StateActive && p.Role() == RoleBond {
+			bond = append(bond, p)
+		}
+	}
+	h.scratchBond = bond
 	if len(bond) == 0 {
 		return nil
 	}
 
-	fastestRTT, primary := fastestTiedSet(bond)
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	fastestRTT, primary := fastestTiedSetInto(bond, h.scratchPrimary)
+	h.scratchPrimary = primary
 
 	// Round-robin among paths tied for fastest -- no HoL tradeoff to make as long as one
 	// of them has room.
