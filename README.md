@@ -205,7 +205,9 @@ fast-path baseline; on homogeneous paths it delivered 84.69 Mbps against round-r
 on the fast path. The gate takes a fresh fast-only baseline immediately before the
 HoL-aware sample, while retaining an initial sample to reveal hosted-runner drift. The
 local harness still skips this gate when the host kernel lacks the required qdisc modules
-instead of fabricating a pass.
+instead of fabricating a pass. Tier 3/4 reuse immutable path views and scheduler-owned
+scratch storage and read congestion windows atomically, keeping the per-packet selection
+path allocation-free after warm-up.
 
 Multi-socket-per-path (Speedify-style, extra throughput on one high-BDP link) is not yet
 implemented. BOND/1 ACK/SACK packets and bounded ACK-driven retransmission are implemented
