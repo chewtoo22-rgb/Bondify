@@ -12,12 +12,13 @@
 // uses a single fixed gain over a windowed max-filtered delivery-rate estimate, which
 // captures the core formula (cwnd = btl_bw * rt_prop * gain) and the core self-correcting
 // property (a stalled path's rate ages out of the window and its cwnd shrinks) without the
-// full phase state machine. Revisit once per-packet ACKs exist (phase 4 retransmission
-// work is the natural point to add them).
+// full phase state machine. Revisit when ACK delivery can be attributed to each original
+// path accurately enough to drive per-RTT delivery samples.
 package cc
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,12 +57,14 @@ type Controller struct {
 	samples [btlBwWindow]float64 // bytes/sec, ring buffer
 	filled  int
 	next    int
-	cwnd    int64
+	cwnd    atomic.Int64
 }
 
 // NewController returns a controller seeded at initialCWND, before any real sample exists.
 func NewController() *Controller {
-	return &Controller{cwnd: initialCWND}
+	c := &Controller{}
+	c.cwnd.Store(initialCWND)
+	return c
 }
 
 // Sample feeds one delivery-rate observation: bytesDelivered arrived at the receiver over
@@ -99,14 +102,12 @@ func (c *Controller) Sample(bytesDelivered int64, elapsed time.Duration, rtProp 
 	if cwnd > maxCWND {
 		cwnd = maxCWND
 	}
-	c.cwnd = cwnd
+	c.cwnd.Store(cwnd)
 }
 
 // CWND returns the current congestion window in bytes.
 func (c *Controller) CWND() int64 {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.cwnd
+	return c.cwnd.Load()
 }
 
 // DeliveryRate returns the current windowed-max delivery-rate estimate in bytes/sec -- the
