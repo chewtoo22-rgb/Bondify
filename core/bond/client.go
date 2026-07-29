@@ -183,19 +183,19 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 	path0.SetActive() // handshake completion is path 0's implicit ack
 
 	t := &ClientTunnel{
-		relayAddr:     raddr,
-		sess:          sess,
-		sessionIndex:  respPayload.SessionIndex,
-		tunnelIP:      respPayload.TunnelIP,
-		startedAt:     time.Now(),
-		sched:         scheduler,
-		reorderBuf:    reorder.New(reorder.DefaultDeadlineMin, 0),
-		ack:           newACKState(),
-		rtx:           newRetransmitQueue(),
-		paths:         []*Path{path0},
-		schedPathView: []sched.Path{path0},
-		mode:          cfg.Mode,
+		relayAddr:    raddr,
+		sess:         sess,
+		sessionIndex: respPayload.SessionIndex,
+		tunnelIP:     respPayload.TunnelIP,
+		startedAt:    time.Now(),
+		sched:        scheduler,
+		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
+		ack:          newACKState(),
+		rtx:          newRetransmitQueue(),
+		paths:        []*Path{path0},
+		mode:         cfg.Mode,
 	}
+	t.schedPathView.Store([]sched.Path{path0})
 	if cfg.FEC {
 		t.fecSend = newFECSender(t.fecLossEstimate, t.sendFECParity)
 		t.fecRecv = newFECGenBuffer()
@@ -313,7 +313,7 @@ func (t *ClientTunnel) addPath(ctx context.Context, id uint8, spec PathSpec, tim
 	for i, path := range t.paths {
 		view[i] = path
 	}
-	t.schedPathView = view
+	t.schedPathView.Store(view)
 	t.pathsMu.Unlock()
 	return nil
 }
@@ -342,7 +342,7 @@ type ClientTunnel struct {
 	paths   []*Path
 	// schedPathView is immutable and replaced whenever a path is added, avoiding two
 	// slice allocations for every packet sent through the scheduler.
-	schedPathView []sched.Path
+	schedPathView atomic.Value // []sched.Path
 
 	pathErrs []error
 
@@ -378,9 +378,8 @@ func (t *ClientTunnel) Paths() []*Path {
 func (t *ClientTunnel) PathErrors() []error { return t.pathErrs }
 
 func (t *ClientTunnel) schedPaths() []sched.Path {
-	t.pathsMu.RLock()
-	defer t.pathsMu.RUnlock()
-	return t.schedPathView
+	view, _ := t.schedPathView.Load().([]sched.Path)
+	return view
 }
 
 // Run pumps packets across all paths until ctx is cancelled or a fatal error occurs.
