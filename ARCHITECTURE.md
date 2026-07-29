@@ -327,6 +327,18 @@ reporting, no account, no default relay logging; reproducible builds.
   without them (`TestHoLAwareSharesLoadAcrossEquallyFastPaths`,
   `TestHoLAwareBothPathsUnmeasuredRTT`, and their Tier 3 equivalents) and were re-verified
   against real running relay+client binaries in the netns rig after the fix.
+- **Fixed blanket multipath retry suppression that penalized an otherwise idle slow
+  path.** The first ACK/SACK implementation gave every hole a one-second grace whenever
+  the receiver reported more than one path. That safely absorbed cross-path skew, but it
+  also suppressed fast recovery when HoL-aware scheduling put every data packet on one
+  fast path and a much slower second path carried probes only. The Phase 3 matrix exposed
+  the result: correct path selection and zero retries, but only 75.84 Mbps against an
+  88.60 Mbps same-scheduler one-path control. The retransmission queue now retains each
+  pending GSN's original path ID. A SACKed successor from that same path permits the 10 ms
+  fast grace; a successor from another path, mixed attribution, or no attribution keeps
+  the conservative one-second grace. Separate unit tests protect both decisions. CI run
+  30411651918 restored heterogeneous HoL-aware throughput to 88.61 Mbps without weakening
+  the FEC, FEC-off loss, or path-death gates.
 - **Fixed a real duplicate-delivery bug in the reorder buffer, found by REDUNDANT mode.**
   `Buffer.Push`'s duplicate check only compared an arriving GSN against `nextExpected`,
   which is sufficient when every GSN can only ever arrive once (SPEED mode: AEAD's per-path
