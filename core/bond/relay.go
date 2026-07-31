@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chewtoo22-rgb/bondify/core/classify"
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
 	"github.com/chewtoo22-rgb/bondify/core/proto"
 	"github.com/chewtoo22-rgb/bondify/core/reorder"
@@ -34,6 +35,11 @@ type RelayConfig struct {
 	Mode Mode
 	// FEC enables adaptive FEC on the relay's own return traffic. See ClientConfig.FEC.
 	FEC bool
+	// Classify enables Tier 5 traffic-class routing on the relay's own return traffic. See
+	// ClientConfig.Classify -- the relay side matters just as much as the client side for
+	// ARCHITECTURE.md §2.1.5's own gate (SSH RTT staying low under a concurrent bulk
+	// download): SSH's low-latency traffic flows in both directions.
+	Classify bool
 }
 
 type relaySession struct {
@@ -54,9 +60,10 @@ type relaySession struct {
 	rtx        *retransmitQueue
 	ackSendMu  sync.Mutex
 
-	mode    Mode
-	fecSend *fecSender    // nil when FEC is disabled
-	fecRecv *fecGenBuffer // nil when FEC is disabled
+	mode     Mode
+	classify bool          // Tier 5 traffic-class routing; see RelayConfig.Classify
+	fecSend  *fecSender    // nil when FEC is disabled
+	fecRecv  *fecGenBuffer // nil when FEC is disabled
 
 	sendGSN atomic.Uint64
 
@@ -82,6 +89,7 @@ func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnel
 		ack:          newACKState(),
 		rtx:          newRetransmitQueue(),
 		mode:         cfg.Mode,
+		classify:     cfg.Classify,
 	}
 	if cfg.FEC {
 		rs.fecSend = newFECSender(rs.fecLossEstimate, func(genID uint16, genIndex, n, m, w int, shard []byte) {
@@ -322,9 +330,12 @@ func (r *Relay) ServeTUN() error {
 			if sess == nil {
 				continue // no session owns this destination; drop
 			}
-			if sess.mode == ModeRedundant {
+			switch {
+			case sess.mode == ModeRedundant:
 				r.sendRedundant(sess, pkt)
-			} else {
+			case sess.classify:
+				r.sendClassified(sess, pkt)
+			default:
 				r.sendSpeed(sess, pkt)
 			}
 		}
@@ -338,7 +349,48 @@ func (r *Relay) sendSpeed(sess *relaySession, pkt []byte) {
 	if path == nil {
 		return // no eligible path right now; drop
 	}
-	p := path.(*Path)
+	r.sendOnPath(sess, path.(*Path), pkt)
+}
+
+// sendPinned is Tier 5's LATENCY handling on the relay's return traffic; see
+// ClientTunnel.sendPinned.
+func (r *Relay) sendPinned(sess *relaySession, pkt []byte) {
+	p := lowestRTTActivePath(sess.pathSlice())
+	if p == nil {
+		return
+	}
+	r.sendOnPath(sess, p, pkt)
+}
+
+// sendSpeedCapped is Tier 5's BULK handling on the relay's return traffic; see
+// ClientTunnel.sendSpeedCapped.
+func (r *Relay) sendSpeedCapped(sess *relaySession, pkt []byte, headroom float64) {
+	path := sess.sched.Next(capByHeadroom(sess.schedPaths(), headroom), len(pkt))
+	if path == nil {
+		return
+	}
+	r.sendOnPath(sess, path.(*Path), pkt)
+}
+
+// sendClassified is Tier 5's dispatcher for the relay's return traffic; see
+// ClientTunnel.sendClassified for the per-class rationale (identical here, mirrored for the
+// relay->client direction).
+func (r *Relay) sendClassified(sess *relaySession, pkt []byte) {
+	switch classify.Classify(pkt) {
+	case classify.Realtime:
+		r.sendRedundant(sess, pkt)
+	case classify.Latency:
+		r.sendPinned(sess, pkt)
+	case classify.Interactive:
+		r.sendSpeed(sess, pkt)
+	default: // classify.Bulk, classify.Unknown
+		r.sendSpeedCapped(sess, pkt, bulkHeadroomFraction)
+	}
+}
+
+// sendOnPath is sendSpeed/sendPinned/sendSpeedCapped's shared body once a path has already
+// been chosen: stamp GSN/PSN/FEC generation info, seal, send, and track for retransmission.
+func (r *Relay) sendOnPath(sess *relaySession, p *Path, pkt []byte) {
 	addr := p.RemoteAddr()
 	if addr == nil {
 		return

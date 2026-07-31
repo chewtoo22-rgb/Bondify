@@ -37,6 +37,7 @@ func main() {
 		scheduler = flag.String("scheduler", "round-robin", "scheduling tier for the relay's own return traffic: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
 		mode      = flag.String("mode", "speed", "sending mode for the relay's own return traffic: speed or redundant")
 		fec       = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on the relay's own return traffic; opt-in since it copies every packet into a generation buffer even at zero loss")
+		classify  = flag.Bool("classify", false, "Tier 5 traffic-class routing on the relay's own return traffic (see the client's -classify flag for the per-class routing); ignored in -mode redundant")
 	)
 	flag.Parse()
 
@@ -93,6 +94,10 @@ func main() {
 		log.Printf("relay: warning: -fec has no effect in -mode redundant; disabling it")
 		*fec = false
 	}
+	if *classify && sendMode == bond.ModeRedundant {
+		log.Printf("relay: warning: -classify has no effect in -mode redundant; disabling it")
+		*classify = false
+	}
 
 	r, err := bond.NewRelay(bond.RelayConfig{
 		ListenAddr: *listen,
@@ -104,6 +109,7 @@ func main() {
 		Scheduler:  *scheduler,
 		Mode:       sendMode,
 		FEC:        *fec,
+		Classify:   *classify,
 	}, dev)
 	if err != nil {
 		log.Fatalf("relay: init: %v", err)

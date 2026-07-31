@@ -23,7 +23,8 @@ must not cause an incompatible protocol change.
 | Phase 4: resilience | REDUNDANT mode, adaptive Reed-Solomon FEC, ACK/SACK and bounded retransmission | Race/unit tests plus real-loss FEC, FEC-off retransmission, and path-death CI gates | Real-device/path-flapping breadth and external security review |
 | Phase 5: Android | Kotlin app, VpnService shell, gomobile AAR build, runtime AddPath/DropPath path churn (see below) | APK compilation in CI; runtime path API covered by real client+relay Go integration tests | No real-device VPN, bonding, churn, or 30-minute screen-off gate has passed |
 | Phase 6: Windows desktop | wintun/tray client, `IP_UNICAST_IF` egress binding, self-elevating installer script | Builds/vets/cross-compiles clean in CI | The actual gate (install-to-bonded < 60s, one UAC prompt) needs a real Windows machine; none available in any sandbox so far |
-| Phase 7+: product | Specifications only or partial scaffolding | Not verified | Traffic classification/split tunnel, PairBond/share mode, installer polish, signed releases |
+| Phase 7: traffic classification (partial) | `core/classify` DSCP+port heuristic, Tier 5 per-class routing (LATENCY pin, REALTIME duplicate, BULK headroom cap) in both `core/bond` client and relay, `-classify` flag | Real (not mocked) unit/integration tests for the classifier and the routing dispatch; full CI suite unchanged | The actual gate (loaded bulk download, SSH RTT within 25% of unloaded) needs a mixed-traffic benchmark harness that doesn't exist yet; budgets and split tunnel not started |
+| Phase 8+: product | Specifications only or partial scaffolding | Not verified | PairBond/share mode, installer polish, signed releases |
 
 Do not describe Bondify as production-ready or independently audited. It is a substantial
 pre-alpha networking implementation with important real-device and security work remaining.
@@ -180,6 +181,67 @@ session instead of that uplink being fixed for the session's whole lifetime.
   enable is still gated on Phase 5's real-device acceptance gate (P0.1 below), which no
   session has been able to run.
 
+## Phase 7 traffic-class routing sprint
+
+Branch: `claude/summary-next-phase-am0sp0` (same session, after the runtime path API sprint
+above). First slice of Phase 7 (ARCHITECTURE.md §5: "Traffic classification, budgets, split
+tunnel"): Tier 5 traffic-class routing (§2.1.5), the piece with no hardware dependency and
+the clearest existing spec. Budgets and split tunnel are separate, not started.
+
+### Implemented and test-verified (real packets/sockets, not mocked)
+
+- New `core/classify` package: `Classify(packet []byte) Class` returns one of
+  LATENCY/REALTIME/INTERACTIVE/BULK/Unknown for a raw IPv4 or IPv6 packet. DSCP marking (RFC
+  4594 PHBs: EF/CS5-7 -> REALTIME, CS4/AF4x -> INTERACTIVE, CS1/AF1x -> BULK) takes priority
+  when present; a small well-known-port fallback (SSH/Telnet -> INTERACTIVE, DNS -> LATENCY,
+  ICMP -> LATENCY, everything else -> BULK) covers the common case where nothing set a DSCP
+  value. Deliberately narrow -- no TLS SNI, no QUIC-is-UDP-443 special case, no per-app
+  awareness, no IPv6 extension-header walking -- see the package doc for why guessing wrong
+  is worse than the honest default. Never panics on malformed/truncated/unrecognized input.
+- `core/bond` (both `ClientTunnel` and the relay's `relaySession`, symmetric in both
+  directions since the gate's SSH-RTT test depends on the return path too): `sendPinned`
+  (LATENCY -> single lowest-RTT path, never split), `sendClassified` reusing the existing
+  `sendRedundant`/`selectRedundantPaths` machinery for REALTIME (duplicate onto the best
+  `DupFactor` paths -- identical mechanism REDUNDANT mode already used, just gated per-packet
+  instead of tunnel-wide), `sendSpeedCapped` + `capByHeadroom` for BULK (hard 90%
+  congestion-window headroom cap, dropping rather than falling back to an uncapped choice
+  when every path is already within its reserved headroom -- falling back would defeat the
+  cap exactly when it matters most). INTERACTIVE and anything unclassifiable fall through to
+  the ordinary configured scheduler tier, unchanged.
+- Opt-in via `-classify` on both `desktop/cmd/bondify` and `relay/cmd/bondify-relay`
+  (`ClientConfig.Classify`/`RelayConfig.Classify`), default off and a no-op when combined with
+  `-mode redundant` (mirrors the existing `-fec`/`-mode redundant` interaction and warning).
+  Existing phases 1-4 throughput gates don't pass this flag, so they're unaffected by
+  construction, not just by observation.
+- Tests: `core/classify/classify_test.go` builds real IPv4/IPv6 packets byte-by-byte (no
+  mocking) covering every recognized DSCP value in both directions, port heuristics from
+  both connection directions, and a battery of malformed/truncated/unrecognized-protocol
+  inputs asserting no panic. `core/bond/classify_routing_test.go` drives the actual
+  `sendPinned`/`sendClassified`/`sendSpeedCapped` methods against real loopback UDP sockets
+  standing in for paths, verifying LATENCY reaches exactly one (the fastest) path, REALTIME
+  reaches both eligible paths, and INTERACTIVE/BULK still flow through the scheduler; plus a
+  pure unit test of `capByHeadroom`'s boundary (exactly-at-the-cap is excluded).
+- Verified: `go build/vet/test -race -count=1` clean across every package, `golangci-lint run`
+  0 issues, `gofmt -l` clean, and cross-builds/vet clean for every CI target
+  (linux/windows/android amd64/arm64/arm as applicable, matching CI's actual per-target
+  build set) -- all unchanged from before this sprint, confirming no regression.
+
+### Not verified, and not claimed as passed
+
+- ARCHITECTURE.md §5's actual Phase 7 gate -- "loaded bulk download, SSH RTT stays within
+  25% of unloaded" -- needs a real concurrent-traffic benchmark harness (analogous to
+  `testbed/run_phase3.sh`/`run_phase4.sh`) that generates a saturating bulk transfer
+  alongside real SSH-shaped interactive traffic and measures RTT under that load. That
+  harness does not exist yet; building it is the next step before this phase can be called
+  gate-verified, not just implemented.
+- The port-based classification fallback is a deliberately small heuristic (see
+  `core/classify`'s package doc) and will misclassify real-world traffic it has no way to
+  distinguish (e.g. QUIC/HTTP3 over UDP 443, which looks identical to any other UDP flow
+  without DSCP; any TCP flow on an uncommon port). This is an accepted, documented
+  limitation for a first slice, not a bug -- BULK is the safe default when unsure.
+- Budgets (metered-link data caps) and split tunnel (per-destination bypass rules) -- the
+  rest of Phase 7's scope per ARCHITECTURE.md's phase table -- have not been started.
+
 ## Priority backlog
 
 ### P0 - complete before calling Phase 5 done
@@ -210,7 +272,9 @@ session instead of that uplink being fixed for the session's whole lifetime.
 
 ### P2 - differentiating features
 
-1. Tier 5 traffic classification and STREAM/CUSTOM modes.
+1. ~~Tier 5 traffic classification~~ Implemented (`core/classify`, `-classify` flag) -- see
+   "Phase 7 traffic-class routing sprint" below. STREAM/CUSTOM `mode_set` values, and the
+   real mixed-traffic benchmark gate proving it, remain open.
 2. Split tunnel/bypass rules and metered-link budgets.
 3. Multi-socket-per-path experiments for high-BDP links.
 4. PairBond and desktop share mode.
@@ -320,3 +384,17 @@ Add concise entries here; link the pull request or commit when available.
   is unverified locally (no Android SDK in this sandbox, same limitation every prior
   Android-touching session has had) and depends on CI's `android-app` job (gomobile bind +
   Gradle) for its first real compile.
+- 2026-07-31 - PR #8 (the runtime path API commit above) opened as a draft against `main`;
+  CI run 30611787157 passed all 9 checks -- every cross-build target, lint, race tests, the
+  tc netem regression gates, and the `android-app` job (gomobile bind + Gradle
+  `assembleDebug` + unit tests), confirming the Kotlin bridge actually compiles. No CI
+  failures or review comments to address as of this entry.
+- 2026-07-31 - Started Phase 7's first slice (traffic-class routing) on the same branch/PR:
+  new `core/classify` package plus Tier 5 routing in `core/bond` (client and relay,
+  symmetric) and the `-classify` flag on both binaries -- see "Phase 7 traffic-class routing
+  sprint" above for the full writeup. `go build/vet/test -race -count=1` clean, `gofmt -l`
+  clean, `golangci-lint run` 0 issues, cross-builds/vet clean for every CI target. New tests:
+  `core/classify/classify_test.go` (real hand-built IPv4/IPv6 packets, 15 cases) and
+  `core/bond/classify_routing_test.go` (real loopback UDP sockets standing in for paths, 6
+  cases), all passing under `-race`. The actual Phase 7 gate (mixed-traffic RTT benchmark)
+  has not been built or run -- explicitly not claimed as passed.

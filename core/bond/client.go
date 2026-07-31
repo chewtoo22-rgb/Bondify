@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chewtoo22-rgb/bondify/core/classify"
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
 	"github.com/chewtoo22-rgb/bondify/core/proto"
 	"github.com/chewtoo22-rgb/bondify/core/reorder"
@@ -59,6 +60,13 @@ type ClientConfig struct {
 	// on outgoing SPEED-mode traffic. Redundancy scales with observed loss and is zero at
 	// zero loss, so leaving this on costs nothing on a clean path.
 	FEC bool
+	// Classify enables Tier 5 traffic-class routing (ARCHITECTURE.md §2.1.5, core/classify):
+	// LATENCY pins to the single lowest-RTT path, REALTIME duplicates like REDUNDANT mode
+	// but only for packets that need it, BULK gets a 90% congestion-window headroom cap, and
+	// INTERACTIVE (and anything unclassifiable) falls through to the configured Scheduler
+	// tier unchanged. Ignored when Mode is ModeRedundant, which already overrides per-packet
+	// routing tunnel-wide. Off by default so existing throughput gates are unaffected.
+	Classify bool
 }
 
 // DialClient performs the Noise_IK handshake on path 0, then registers any additional
@@ -194,6 +202,7 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 		rtx:          newRetransmitQueue(),
 		paths:        []*Path{path0},
 		mode:         cfg.Mode,
+		classify:     cfg.Classify,
 		handshakeTO:  handshakeTO,
 		handshakeTry: tries,
 	}
@@ -336,9 +345,10 @@ type ClientTunnel struct {
 	rtx        *retransmitQueue
 	ackSendMu  sync.Mutex
 
-	mode    Mode
-	fecSend *fecSender    // nil when FEC is disabled
-	fecRecv *fecGenBuffer // nil when FEC is disabled
+	mode     Mode
+	classify bool          // Tier 5 traffic-class routing; see ClientConfig.Classify
+	fecSend  *fecSender    // nil when FEC is disabled
+	fecRecv  *fecGenBuffer // nil when FEC is disabled
 
 	pathsMu sync.RWMutex
 	paths   []*Path
@@ -563,9 +573,12 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 		}
 		for i := 0; i < n; i++ {
 			payload := bufs[i][tun.IOOffset : tun.IOOffset+sizes[i]]
-			if t.mode == ModeRedundant {
+			switch {
+			case t.mode == ModeRedundant:
 				t.sendRedundant(payload)
-			} else {
+			case t.classify:
+				t.sendClassified(payload)
+			default:
 				t.sendSpeed(payload)
 			}
 		}
@@ -579,7 +592,75 @@ func (t *ClientTunnel) sendSpeed(payload []byte) {
 	if path == nil {
 		return // no eligible path right now; drop (queueing is a later refinement)
 	}
-	p := path.(*Path)
+	t.sendOnPath(path.(*Path), payload)
+}
+
+// sendPinned is Tier 5's LATENCY handling (ARCHITECTURE.md §2.1.5): pinned to the single
+// lowest-RTT ACTIVE path, bypassing the configured scheduler tier entirely. LATENCY traffic
+// must never split across paths -- reordering delay from a second path would undo the whole
+// point of routing it specially.
+func (t *ClientTunnel) sendPinned(payload []byte) {
+	p := lowestRTTActivePath(t.Paths())
+	if p == nil {
+		return // no eligible path right now; drop, same as sendSpeed's own case
+	}
+	t.sendOnPath(p, payload)
+}
+
+// bulkHeadroomFraction is ARCHITECTURE.md §2.1.5's "hard 90% headroom cap" for BULK-class
+// traffic: it never lets a path's in-flight bytes reach this fraction of its congestion
+// window, reserving the rest for LATENCY/REALTIME traffic that might need the same path.
+const bulkHeadroomFraction = 0.90
+
+// sendSpeedCapped is sendSpeed with the scheduler restricted to paths that still have
+// headroom fraction of slack in their congestion window -- Tier 5's BULK handling.
+func (t *ClientTunnel) sendSpeedCapped(payload []byte, headroom float64) {
+	path := t.sched.Next(capByHeadroom(t.schedPaths(), headroom), len(payload))
+	if path == nil {
+		// Every eligible path is already within its reserved headroom -- expected under a
+		// sustained BULK-only load, not an error. Drop rather than fall back to an uncapped
+		// choice: falling back would defeat the cap's entire purpose exactly when it matters
+		// most (a saturating transfer). Queueing is a later refinement, same as sendSpeed.
+		return
+	}
+	t.sendOnPath(path.(*Path), payload)
+}
+
+// capByHeadroom returns the subset of paths with in-flight bytes still under headroom
+// fraction of their congestion window.
+func capByHeadroom(paths []sched.Path, headroom float64) []sched.Path {
+	out := make([]sched.Path, 0, len(paths))
+	for _, p := range paths {
+		if float64(p.InFlight()) < float64(p.CWND())*headroom {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// sendClassified is Tier 5's dispatcher: classify.Classify picks a class for payload, and
+// each class routes differently (ARCHITECTURE.md §2.1.5). Only reached when t.classify is
+// set -- ModeRedundant still takes priority tunnel-wide (see tunToNet), matching how
+// REDUNDANT mode already overrides the scheduler tier for every packet, not just some.
+func (t *ClientTunnel) sendClassified(payload []byte) {
+	switch classify.Classify(payload) {
+	case classify.Realtime:
+		// "Duplicates on the two best paths" is exactly what REDUNDANT mode's sendRedundant
+		// already does (same DupFactor, same best-by-RTT selection, same dedup-via-replay-
+		// window mechanics) -- reused directly rather than re-implemented for one class.
+		t.sendRedundant(payload)
+	case classify.Latency:
+		t.sendPinned(payload)
+	case classify.Interactive:
+		t.sendSpeed(payload)
+	default: // classify.Bulk, classify.Unknown
+		t.sendSpeedCapped(payload, bulkHeadroomFraction)
+	}
+}
+
+// sendOnPath is sendSpeed/sendPinned/sendSpeedCapped's shared body once a path has already
+// been chosen: stamp GSN/PSN/FEC generation info, seal, send, and track for retransmission.
+func (t *ClientTunnel) sendOnPath(p *Path, payload []byte) {
 	gsn := t.sendGSN.Add(1) - 1
 	psn := p.NextSendPSN()
 

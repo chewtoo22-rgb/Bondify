@@ -324,6 +324,48 @@ like this typically only surfaces as a runtime crash, which nothing here can cat
 that is real outstanding work for whoever picks this up with access to an actual Windows
 machine.
 
+## Verified so far (Phase 7, partial)
+
+Phase 7 is traffic classification, budgets, and split tunnel (ARCHITECTURE.md §5). Only the
+first piece has landed so far: Tier 5 traffic-class routing (§2.1.5) — `core/classify`
+classifies each outgoing IP packet by DSCP marking, falling back to a small well-known-port
+list (SSH → INTERACTIVE, DNS → LATENCY, everything else → BULK, the safe default), and
+`core/bond` routes each class differently: LATENCY pins to the single lowest-RTT path and
+never splits, REALTIME duplicates onto the best paths exactly like `-mode redundant` but only
+for packets that need it, BULK gets a hard 90% congestion-window headroom cap so it can never
+starve the other two classes sharing a path, and INTERACTIVE (plus anything unclassifiable)
+uses the configured `-scheduler` tier unchanged. Opt-in via `-classify` on both binaries
+(default off, matching `-fec`) — existing throughput gates for phases 1–4 are completely
+unaffected since they don't pass it.
+
+**Read this section as narrowly as it's written**, same caveat as phases 5 and 6:
+ARCHITECTURE.md §5's actual Phase 7 gate — "loaded bulk download, SSH RTT stays within 25% of
+unloaded" — needs a real concurrent-traffic benchmark harness (a saturating bulk transfer plus
+real SSH-shaped traffic, RTT measured under that load) that does not exist yet. **That gate is
+not claimed as passed.** What's verified is real, but narrower:
+
+- `core/classify`'s `Classify` function is unit-tested against real, hand-built IPv4/IPv6
+  packets (not mocked) covering every recognized DSCP value in both directions, port
+  heuristics from both the client and server side of a connection, IPv4 and IPv6, and a
+  battery of malformed/truncated/unrecognized-protocol inputs that must never panic.
+- `core/bond`'s per-class routing (`sendPinned`, `sendClassified`, `sendSpeedCapped`,
+  `capByHeadroom`) is tested against real loopback UDP sockets standing in for paths — not
+  mocked — verifying LATENCY genuinely reaches only the lowest-RTT path, REALTIME genuinely
+  duplicates onto every eligible path, and INTERACTIVE/BULK genuinely still flow through the
+  configured scheduler tier.
+- Both the client and relay apply this symmetrically (the relay's own return traffic is
+  classified and routed the same way), since the Phase 7 gate's SSH-RTT test depends on both
+  directions staying responsive.
+- `go build/vet/test -race` and `golangci-lint run` all pass unchanged across every CI
+  platform target, confirming this didn't regress anything already gate-verified in phases
+  1–6.
+
+**Known gaps, honestly stated:** no real mixed-traffic benchmark has run (the actual Phase 7
+gate), the port-based classification heuristic is intentionally small and will misclassify
+plenty of real traffic (no TLS SNI inspection, no QUIC-over-UDP-443 special case, no
+per-application awareness — see `core/classify`'s package doc for the reasoning), and budgets
+plus split tunnel (the rest of Phase 7's scope) haven't been started.
+
 ## Scheduler tiers
 
 Pass `-scheduler <name>` to either binary to pick the tier (default `round-robin`):
@@ -340,4 +382,6 @@ real, building/cross-compiling code, but their actual gates (bonded throughput/s
 survival on Android; install-to-bonded time/UAC-prompt count on Windows) need a real device
 or a real Windows session respectively and have not been verified — see "Verified so far
 (Phase 5)" and "Verified so far (Phase 6)" above. Phase 7 (traffic classification, budgets,
-split tunnel) is next after that.
+split tunnel) has started: Tier 5 traffic-class routing is implemented and unit-tested (see
+"Verified so far (Phase 7, partial)" above), but its own gate — a real mixed-traffic
+benchmark — hasn't run, and budgets/split tunnel haven't been started.
