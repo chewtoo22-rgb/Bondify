@@ -153,6 +153,29 @@ func (rs *relaySession) pathByID(id uint8) *Path {
 	return rs.paths[id]
 }
 
+// removePath takes id out of the session's path pool and schedulable view, returning it (or
+// nil if it wasn't registered). Called on an authenticated PATH_DROP so the relay stops
+// scheduling return traffic onto a client-retired path immediately, instead of waiting up to
+// PathDeadTimeout for liveness timeouts to notice on their own (see handlePathDrop).
+func (rs *relaySession) removePath(id uint8) *Path {
+	rs.pathsMu.Lock()
+	defer rs.pathsMu.Unlock()
+	p, ok := rs.paths[id]
+	if !ok {
+		return nil
+	}
+	delete(rs.paths, id)
+	current, _ := rs.schedPathView.Load().([]sched.Path)
+	view := make([]sched.Path, 0, len(current))
+	for _, sp := range current {
+		if sp.ID() != id {
+			view = append(view, sp)
+		}
+	}
+	rs.schedPathView.Store(view)
+	return p
+}
+
 // Relay is the multi-path relay: one UDP socket demultiplexing by Session Index and Path
 // ID, one shared TUN device for all sessions (the kernel's own routing/NAT handles getting
 // decrypted packets to the real internet and back).
@@ -585,12 +608,14 @@ func (r *Relay) handleUDP(buf []byte, src *net.UDPAddr) {
 		r.handleACK(oh, buf[consumed:])
 	case proto.TypePathAdd:
 		r.handlePathAdd(oh, buf[consumed:], src)
+	case proto.TypePathDrop:
+		r.handlePathDrop(oh, buf[consumed:])
 	case proto.TypeProbe:
 		r.handleProbe(oh, buf[consumed:], src)
 	case proto.TypeProbeAck:
 		r.handleProbeAck(oh, buf[consumed:], src)
 	default:
-		// PATH_DROP/CTRL(other kinds) land in later phases.
+		// CTRL(other kinds) lands in later phases.
 	}
 }
 
@@ -712,6 +737,34 @@ func (r *Relay) handlePathAdd(oh proto.OuterHeader, ciphertext []byte, src *net.
 		return
 	}
 	log.Printf("bond: session %08x path %d added from %s", sess.sessionIndex, req.PathID, src)
+}
+
+// handlePathDrop retires a client-initiated path immediately instead of leaving it in the
+// pool until liveness timeouts notice the silence (see updateRelayPathLiveness): a client
+// that already knows a physical uplink is gone (Android's onLost, a Linux interface going
+// down) can tell the relay so return traffic stops targeting it right away, rather than the
+// relay continuing to round-robin onto a dead address for up to PathDeadTimeout. Best effort
+// by design -- see PathDropPayload's doc comment -- a lost PATH_DROP just means the existing
+// liveness timeout still catches it, only later.
+func (r *Relay) handlePathDrop(oh proto.OuterHeader, ciphertext []byte) {
+	r.mu.RLock()
+	sess := r.byIndex[oh.SessionIndex]
+	r.mu.RUnlock()
+	if sess == nil {
+		return
+	}
+	pathID := ciphertext0PathIDHint(oh)
+	payload, err := openControl(sess.sess, oh, pathID, ciphertext)
+	if err != nil {
+		return
+	}
+	var req PathDropPayload
+	if err := unmarshalCBOR(payload, &req); err != nil || req.PathID != pathID {
+		return
+	}
+	if sess.removePath(req.PathID) != nil {
+		log.Printf("bond: session %08x path %d dropped (%s)", sess.sessionIndex, req.PathID, req.Reason)
+	}
 }
 
 // ciphertext0PathIDHint extracts the AEAD nonce's top byte (the path ID) from the outer

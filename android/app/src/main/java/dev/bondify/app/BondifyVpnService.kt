@@ -207,10 +207,14 @@ class BondifyVpnService : VpnService() {
      * protects it from the VPN's own capture, and hands its fd to [builder].
      *
      * The callbacks intentionally remain registered after this function returns so Android
-     * keeps the requested physical networks alive. The `accepting` gate prevents a late or
-     * repeated callback from mutating [builder] after its handshake has started. Runtime
-     * path replacement after `onLost` needs a separate Go `AddPath` API and is tracked in
-     * PROJECT_STATUS.md rather than being faked by mutating this one-shot builder.
+     * keeps the requested physical networks alive for the rest of the connection, not just
+     * this initial gathering window. The `accepting` gate governs which of two paths a given
+     * callback event takes: while gathering, `onAvailable` mutates [builder] (pre-handshake,
+     * one-shot); once handshake has started, the same events instead call [tunnel]'s own
+     * runtime [Tunnel.addPathFD]/[Tunnel.dropPathLabel] (core/bond's `AddPath`/`DropPath` --
+     * see mobile/mobile.go), so a physical uplink lost mid-session (Wi-Fi walking out of
+     * range, a cellular handover, the device coming back from airplane mode) rejoins the
+     * bond instead of being gone for the rest of the session.
      */
     private fun acquirePaths(builder: TunnelBuilder, endpoint: RelayEndpoint): AcquiredPaths {
         var added = 0
@@ -219,38 +223,75 @@ class BondifyVpnService : VpnService() {
         val addedLabels = mutableSetOf<String>()
         val networks = mutableListOf<Network>()
 
-        fun tryAddPath(network: Network, label: String) {
-            synchronized(lock) {
-                if (!accepting || stopping || label in addedLabels) {
-                    return
+        fun dialSocketFd(network: Network, label: String): Long {
+            var detachedFd: Int? = null
+            val socket = DatagramSocket()
+            try {
+                network.bindSocket(socket)
+                check(protect(socket)) {
+                    "VpnService.protect() rejected the $label uplink socket"
                 }
-                var detachedFd: Int? = null
+                socket.connect(InetSocketAddress(endpoint.host, endpoint.port))
+                val pfd = ParcelFileDescriptor.fromDatagramSocket(socket)
+                detachedFd = pfd.detachFd()
+                val fd = checkNotNull(detachedFd)
+                detachedFd = null // the caller's AddPathFD consumes the descriptor even on error
+                return fd.toLong()
+            } finally {
+                socket.close()
+                detachedFd?.let { fd -> runCatching { ParcelFileDescriptor.adoptFd(fd).close() } }
+            }
+        }
+
+        // Adds network as label to the not-yet-handshaked builder. Returns true if it
+        // handled the event (whether or not the add itself succeeded); false means the
+        // gathering window had already closed and the caller should try a runtime add
+        // instead.
+        fun tryAddDuringGathering(network: Network, label: String): Boolean {
+            synchronized(lock) {
+                if (!accepting) {
+                    return false
+                }
+                if (stopping || label in addedLabels) {
+                    return true // handled: nothing to do
+                }
                 try {
-                    val socket = DatagramSocket()
-                    try {
-                        network.bindSocket(socket)
-                        check(protect(socket)) {
-                            "VpnService.protect() rejected the $label uplink socket"
-                        }
-                        socket.connect(InetSocketAddress(endpoint.host, endpoint.port))
-                        val pfd = ParcelFileDescriptor.fromDatagramSocket(socket)
-                        detachedFd = pfd.detachFd()
-                        val fdForGo = checkNotNull(detachedFd)
-                        detachedFd = null // AddPathFD consumes the descriptor even on error
-                        builder.addPathFD(fdForGo.toLong(), label)
-                    } finally {
-                        socket.close()
-                    }
+                    builder.addPathFD(dialSocketFd(network, label), label)
                     addedLabels += label
                     networks += network
                     added++
                     Log.i(TAG, "added path: $label")
                 } catch (e: Exception) {
-                    detachedFd?.let { fd ->
-                        runCatching { ParcelFileDescriptor.adoptFd(fd).close() }
-                    }
                     Log.w(TAG, "could not add $label path: ${e.message}")
                 }
+                return true
+            }
+        }
+
+        fun tryRuntimeAdd(network: Network, label: String) {
+            val t = tunnel ?: return // handshake not finished yet; drop this event, same as
+            // any other narrow-window race this class already tolerates (see class doc).
+            try {
+                t.addPathFD(dialSocketFd(network, label), label)
+                Log.i(TAG, "runtime-added path: $label")
+            } catch (e: Exception) {
+                Log.w(TAG, "could not runtime-add $label path: ${e.message}")
+            }
+        }
+
+        fun tryRuntimeDrop(label: String) {
+            val t = tunnel ?: return
+            try {
+                t.dropPathLabel(label)
+                Log.i(TAG, "runtime-dropped path: $label")
+            } catch (e: Exception) {
+                Log.w(TAG, "could not runtime-drop $label path: ${e.message}")
+            }
+        }
+
+        fun onNetworkAvailable(network: Network, label: String) {
+            if (!tryAddDuringGathering(network, label)) {
+                tryRuntimeAdd(network, label)
             }
         }
 
@@ -259,7 +300,8 @@ class BondifyVpnService : VpnService() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
         wifiCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = tryAddPath(network, "wifi")
+            override fun onAvailable(network: Network) = onNetworkAvailable(network, "wifi")
+            override fun onLost(network: Network) = tryRuntimeDrop("wifi")
         }
         connectivityManager.requestNetwork(wifiRequest, wifiCallback!!)
 
@@ -268,14 +310,16 @@ class BondifyVpnService : VpnService() {
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
         cellularCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = tryAddPath(network, "cellular")
+            override fun onAvailable(network: Network) = onNetworkAvailable(network, "cellular")
+            override fun onLost(network: Network) = tryRuntimeDrop("cellular")
         }
         connectivityManager.requestNetwork(cellularRequest, cellularCallback!!)
 
         Thread.sleep(PATH_WAIT_MS)
         return synchronized(lock) {
             // If a callback is already adding a path, acquiring this lock waits for it to
-            // finish. No builder mutation can cross this boundary into Handshake().
+            // finish. No builder mutation can cross this boundary into Handshake(); every
+            // onAvailable after this point takes the tryRuntimeAdd branch instead.
             accepting = false
             AcquiredPaths(added, networks.toList())
         }

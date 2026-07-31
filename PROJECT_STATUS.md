@@ -4,7 +4,7 @@ This is the shared handoff for Matt, Claude, Codex, and future contributors. Upd
 every pull request that changes a phase gate, closes a tracked gap, or discovers a new one.
 The repository and captured test output are authoritative; a chat transcript is not.
 
-Last updated: 2026-07-29
+Last updated: 2026-07-31
 
 ## Naming
 
@@ -21,8 +21,9 @@ must not cause an incompatible protocol change.
 | Phase 2: multipath | PATH_ADD, probing, GSN reorder, round robin | Two-path netns runs and CI gate | More churn/flapping coverage |
 | Phase 3: scheduling | Weighted, minRTT+cwnd, HoL-aware schedulers | Unit tests, shaped benchmark gate in CI | Relay-side measurement/pacing remains simplified |
 | Phase 4: resilience | REDUNDANT mode, adaptive Reed-Solomon FEC, ACK/SACK and bounded retransmission | Race/unit tests plus real-loss FEC, FEC-off retransmission, and path-death CI gates | Real-device/path-flapping breadth and external security review |
-| Phase 5: Android | Kotlin app, VpnService shell, gomobile AAR build | APK compilation in CI | No real-device VPN, bonding, churn, or 30-minute screen-off gate has passed |
-| Phase 6+: product | Specifications only or partial scaffolding | Not verified | Windows app, intelligence, sharing, installer, signed releases |
+| Phase 5: Android | Kotlin app, VpnService shell, gomobile AAR build, runtime AddPath/DropPath path churn (see below) | APK compilation in CI; runtime path API covered by real client+relay Go integration tests | No real-device VPN, bonding, churn, or 30-minute screen-off gate has passed |
+| Phase 6: Windows desktop | wintun/tray client, `IP_UNICAST_IF` egress binding, self-elevating installer script | Builds/vets/cross-compiles clean in CI | The actual gate (install-to-bonded < 60s, one UAC prompt) needs a real Windows machine; none available in any sandbox so far |
+| Phase 7+: product | Specifications only or partial scaffolding | Not verified | Traffic classification/split tunnel, PairBond/share mode, installer polish, signed releases |
 
 Do not describe Bondify as production-ready or independently audited. It is a substantial
 pre-alpha networking implementation with important real-device and security work remaining.
@@ -106,9 +107,6 @@ Branch: `agent/android-path-lifecycle`
 
 ### Still not fixed by this sprint
 
-- Android cannot dynamically add a replacement socket to a running Go tunnel after
-  `NetworkCallback.onLost`/`onAvailable`. This requires a thread-safe runtime `AddPath` API
-  in `core/bond` and `mobile`, not reuse of the one-shot handshake builder.
 - A handshake already blocked inside Go can take up to its current retry/deadline window to
   observe Android cancellation.
 - Android client private keys still use ordinary private `SharedPreferences`; migrate them
@@ -117,27 +115,92 @@ Branch: `agent/android-path-lifecycle`
   sockets bypass the TUN on a real device.
 - No real Android device gate has passed.
 
+## Runtime path API sprint
+
+Branch: `claude/summary-next-phase-am0sp0`
+
+Closes the top item of the former P0 backlog: a safe runtime path API across `core/bond` ->
+`mobile` -> Kotlin, so Android's `NetworkCallback.onLost`/`onAvailable` (network replacement,
+NAT rebinding, Wi-Fi/cellular return) can add or drop an uplink from an already-running
+session instead of that uplink being fixed for the session's whole lifetime.
+
+### Implemented and test-verified (Go integration tests, real client+relay, `-race` clean)
+
+- `ClientTunnel.AddPath(ctx, id, spec)` and `ClientTunnel.DropPath(id, reason)`: thread-safe,
+  callable concurrently with `Run`, each other, and repeatedly. `AddPath` completes a real
+  PATH_ADD handshake against the relay and, if `Run` has already started, immediately spawns
+  the new path's read/probe loops; called before `Run`, the path is simply picked up by
+  `Run`'s own startup loop, matching the pre-existing `DialHandshake` behavior. `DropPath`
+  removes the path from the schedulable pool before touching its socket (so no in-flight
+  scheduler decision can hand it out afterward), best-effort tells the relay via a real
+  `PATH_DROP` control packet, then closes the socket.
+- A real, previously-latent bug fixed as part of this: `Run` funneled every path's read-loop
+  error into the same fatal channel that `ctx.Done()`/TUN errors use, so *any* single path's
+  UDP socket erroring (a NIC going down, an ICMP port-unreachable, or `DropPath`'s own
+  intentional close) tore down the *entire* tunnel, including every other still-healthy path.
+  Runtime path replacement is meaningless without fixing this first. Only `t.dev` (TUN
+  device) and TUN-pump errors are fatal now; a path-level read failure removes just that path
+  (`ClientTunnel.spawnPathLoops`) and leaves the rest of the session running.
+- `spawnPathLoops` is guarded by a per-`Path` `atomic.Bool` CAS so a path added concurrently
+  by both `Run`'s own startup loop and a racing `AddPath` call only starts its goroutines
+  once, not twice.
+- Relay-side `PATH_DROP` handling (`handlePathDrop`/`relaySession.removePath`): previously
+  defined on the wire (`proto.TypePathDrop`, `PathDropPayload`) but never sent or handled by
+  either side. Without it, a dropped path lingered in the relay's schedulable pool for up to
+  `PathDeadTimeout` (10s), during which the relay could keep routing return traffic onto a
+  socket the client had already closed.
+- `mobile.Tunnel.AddPathFD(fd, label)` / `Tunnel.DropPathLabel(label)`: the gomobile-bindable
+  wrapper Kotlin calls, addressing paths by the same human-readable label (`"wifi"`,
+  `"cellular"`) `TunnelBuilder.AddPathFD` already uses, so the Kotlin side never has to track
+  raw `core/bond` path IDs itself.
+- `android/app`'s `BondifyVpnService.kt`: `NetworkCallback.onAvailable`/`onLost` for both
+  Wi-Fi and cellular now call the runtime API once the initial handshake-gathering window has
+  closed, instead of the callbacks going inert after that window (as the code and its own
+  comment previously stated explicitly).
+- Verified: `go build ./...`, `go vet ./...`, `go test ./... -race` (all packages green, no
+  regressions), `GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build/vet ./mobile/...` (clean).
+  New tests in `core/bond/client_runtime_path_test.go` and `relay_path_drop_test.go` run a
+  real `*Relay` (genuine `ServeUDP`, `handlePathAdd`, `handlePathDrop`) against a real
+  `DialHandshake`'d client -- not mocked -- covering: add-before-Run doesn't spawn loops yet,
+  add-after-Run spawns immediately and the relay genuinely registers the new path, duplicate
+  IDs are rejected, drop removes the path from both sides and a fresh `AddPath` still works
+  afterward (proving the session survives), and dropping an unregistered ID errors.
+
+### Not verified, and not claimed as passed
+
+- No real Android device: the Kotlin changes compile against the pattern gomobile already
+  uses elsewhere in this file (`builder.addPathFD` -> the new `tunnel.addPathFD`/
+  `tunnel.dropPathLabel` follow the same lowercase-first-letter binding convention and
+  Go-`error`-becomes-Kotlin-exception convention already proven by every other call in this
+  file), but this sandbox has no Android SDK/emulator to run `gomobile bind` or Gradle
+  itself -- CI's `android-app` job (gomobile bind + `assembleDebug` + unit tests) is the
+  first real compiler for the Kotlin side of this change, same limitation every prior
+  Android-touching session in this repo has had.
+- The actual Wi-Fi<->cellular handover-survives-mid-transfer behavior this API exists to
+  enable is still gated on Phase 5's real-device acceptance gate (P0.1 below), which no
+  session has been able to run.
+
 ## Priority backlog
 
 ### P0 - complete before calling Phase 5 done
 
-1. Add a safe runtime path API across `core/bond` -> `mobile` -> Kotlin. Handle Android
-   `onLost`, network replacement, NAT rebinding, and Wi-Fi/cellular return without killing
-   the session.
-2. Run the APK on a physical phone:
+1. Run the APK on a physical phone:
    - permission and one-path traffic smoke test;
    - Wi-Fi-only, cellular-only, and bonded throughput comparison;
-   - kill and restore each path during one TCP transfer;
+   - kill and restore each path during one TCP transfer (the runtime `AddPath`/`DropPath`
+     API above is what this now exercises -- unverified on real hardware);
    - 30-minute screen-off/Doze survival;
    - reconnect after airplane mode and network roaming.
-3. Add the protect-loop, MTU/MSS, fuzz, and full survivability gates specified by
+2. Add the protect-loop, MTU/MSS, fuzz, and full survivability gates specified by
    `HYDRA_Spec`/`ARCHITECTURE.md`.
-4. Resolve Android key storage, log redaction, notification permission behavior, and
+3. Resolve Android key storage, log redaction, notification permission behavior, and
    foreground-service policy before distributing a release APK.
 
 ### P1 - desktop and deployability
 
-1. Windows service/tray split using Wintun and `IP_UNICAST_IF`.
+1. ~~Windows service/tray split using Wintun and `IP_UNICAST_IF`.~~ Implemented in Phase 6
+   (`c2cd353`); the actual install-to-bonded gate still needs a real Windows machine (see the
+   Phase 6 row above).
 2. Relay allow-list/authentication policy, handshake rate limiting/cookies, config file,
    systemd unit, firewall setup, one-line installer, and QR onboarding.
 3. Signed artifacts, SBOM, reproducible-build work, dependency/security scanning, and a
@@ -240,3 +303,20 @@ Add concise entries here; link the pull request or commit when available.
   versus 85.207 Mbps round-robin. Phase 4 measured 0.02712% loss with FEC, 0.86791% with
   FEC disabled and retransmission enabled, and completed the path-death TCP transfer at
   184.200 Mbps.
+- 2026-07-31 - Baseline inspection of `main` at `6e46242`: Phases 0-4 verified as above;
+  Phase 5 (Android) and Phase 6 (Windows, merged since in PR #7 at `c2cd353`) both build in
+  CI but have no real-device gate evidence -- no session so far has had access to the
+  physical hardware either requires. Started `claude/summary-next-phase-am0sp0` to close the
+  top P0 backlog item (Android runtime path API) since it, unlike the hardware gates
+  themselves, is fully implementable and testable without real hardware.
+- 2026-07-31 - Implemented `ClientTunnel.AddPath`/`DropPath`, relay-side `PATH_DROP` handling,
+  and the `mobile`/Kotlin bridge (`Tunnel.AddPathFD`/`DropPathLabel`,
+  `BondifyVpnService.kt`'s `NetworkCallback` wired to them post-handshake) -- see "Runtime
+  path API sprint" above for the full writeup, including a real pre-existing bug found and
+  fixed along the way (one path's socket error tore down the whole tunnel). `go build ./...`,
+  `go vet ./...`, and `go test ./... -race` all clean; new real-relay integration tests in
+  `core/bond/client_runtime_path_test.go` and `relay_path_drop_test.go` pass under `-race`.
+  `GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build/vet ./mobile/...` clean. The Kotlin side
+  is unverified locally (no Android SDK in this sandbox, same limitation every prior
+  Android-touching session has had) and depends on CI's `android-app` job (gomobile bind +
+  Gradle) for its first real compile.

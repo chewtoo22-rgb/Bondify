@@ -194,6 +194,8 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 		rtx:          newRetransmitQueue(),
 		paths:        []*Path{path0},
 		mode:         cfg.Mode,
+		handshakeTO:  handshakeTO,
+		handshakeTry: tries,
 	}
 	t.schedPathView.Store([]sched.Path{path0})
 	if cfg.FEC {
@@ -348,6 +350,21 @@ type ClientTunnel struct {
 
 	sendGSN atomic.Uint64
 
+	// handshakeTO/handshakeTry are the resolved (default-filled) values DialHandshake used
+	// for path 0 and its initial cfg.Paths, kept around so a later runtime AddPath call
+	// uses the same knobs instead of silently falling back to different ones.
+	handshakeTO  time.Duration
+	handshakeTry int
+
+	// runCtx holds the context.Context passed to Run, once Run has actually started, so a
+	// concurrent AddPath call knows whether to spawn a new path's read/probe loops itself
+	// (Run is already past the point where it would pick the path up on its own) or leave
+	// that to Run's own startup loop (Run hasn't started iterating paths yet). A nil Load
+	// means Run has not started. atomic.Pointer, not atomic.Value, because context.Context
+	// is an interface -- atomic.Value panics if concrete types differ across Store calls,
+	// which an interface field can't guarantee the way a pointer to a fixed type can.
+	runCtx atomic.Pointer[context.Context]
+
 	Stats Stats
 }
 
@@ -373,6 +390,40 @@ func (t *ClientTunnel) Paths() []*Path {
 	return out
 }
 
+// pathByID returns the path with the given ID, or nil if none is currently registered.
+func (t *ClientTunnel) pathByID(id uint8) *Path {
+	t.pathsMu.RLock()
+	defer t.pathsMu.RUnlock()
+	for _, p := range t.paths {
+		if p.id == id {
+			return p
+		}
+	}
+	return nil
+}
+
+// removePath takes id out of the schedulable pool (and the plain path list) and returns it,
+// or returns nil if id wasn't registered. It does not touch the path's socket or state --
+// callers decide what that means (DropPath closes it deliberately; a failed read loop has
+// already had its socket fail on its own).
+func (t *ClientTunnel) removePath(id uint8) *Path {
+	t.pathsMu.Lock()
+	defer t.pathsMu.Unlock()
+	for i, p := range t.paths {
+		if p.id != id {
+			continue
+		}
+		t.paths = append(t.paths[:i:i], t.paths[i+1:]...)
+		view := make([]sched.Path, len(t.paths))
+		for j, path := range t.paths {
+			view[j] = path
+		}
+		t.schedPathView.Store(view)
+		return p
+	}
+	return nil
+}
+
 // PathErrors returns any errors encountered adding paths during DialClient. A non-empty
 // result means the tunnel is running with fewer paths than requested, not that it's down.
 func (t *ClientTunnel) PathErrors() []error { return t.pathErrs }
@@ -382,26 +433,102 @@ func (t *ClientTunnel) schedPaths() []sched.Path {
 	return view
 }
 
-// Run pumps packets across all paths until ctx is cancelled or a fatal error occurs.
-func (t *ClientTunnel) Run(ctx context.Context) error {
-	paths := t.Paths()
-	errCh := make(chan error, len(paths)+2)
+// runningContext returns the context.Context passed to Run, and whether Run has actually
+// started (as opposed to a caller adding paths before ever calling Run -- see AddPath).
+func (t *ClientTunnel) runningContext() (context.Context, bool) {
+	v := t.runCtx.Load()
+	if v == nil {
+		return nil, false
+	}
+	return *v, true
+}
 
-	go func() { errCh <- t.tunToNet(ctx) }()
-	go func() { errCh <- t.drainReorderToTun(ctx) }()
+// spawnPathLoops launches p's read and probe loops exactly once, no matter how many callers
+// race to spawn them (Run's own startup loop over the initial path set, and a concurrent
+// AddPath registering the same path just before Run reaches it). A read-loop failure that
+// isn't just ctx being cancelled (the path's socket erroring, or DropPath closing it on
+// purpose) removes p from the schedulable pool instead of tearing down the whole tunnel --
+// other paths, if any, keep the session alive, and AddPath can register a replacement.
+func (t *ClientTunnel) spawnPathLoops(ctx context.Context, p *Path) {
+	if !p.loopsStarted.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		if err := t.pathReadLoop(ctx, p); err != nil && ctx.Err() == nil {
+			t.removePath(p.id)
+		}
+	}()
+	go t.probeLoop(ctx, p)
+}
+
+// AddPath registers a new uplink on an already-established session: it dials (or, on
+// platforms like Android where spec.Conn is pre-bound/pre-protected, adopts) a socket,
+// completes the PATH_ADD handshake, and -- if Run has already started -- immediately spawns
+// this path's read/probe loops so it starts carrying traffic right away rather than waiting
+// for a Run call that has already happened. Safe to call concurrently with Run, DropPath,
+// and other AddPath calls. id must not already be registered; a previously DropPath'd id may
+// be reused (crypto.Session's per-path nonce counters and replay windows are keyed by id and
+// persist for the life of the session, so reuse is not a nonce-reuse risk).
+//
+// This is the piece PROJECT_STATUS.md's Android backlog calls "a thread-safe runtime AddPath
+// API" -- see mobile/mobile.go and android/app's BondifyVpnService.kt for the platform side
+// that calls it from a ConnectivityManager.NetworkCallback.
+func (t *ClientTunnel) AddPath(ctx context.Context, id uint8, spec PathSpec) error {
+	if t.pathByID(id) != nil {
+		return fmt.Errorf("bond: path %d already registered", id)
+	}
+	if err := t.addPath(ctx, id, spec, t.handshakeTO, t.handshakeTry); err != nil {
+		return err
+	}
+	if runCtx, ok := t.runningContext(); ok {
+		if p := t.pathByID(id); p != nil {
+			t.spawnPathLoops(runCtx, p)
+		}
+	}
+	return nil
+}
+
+// DropPath retires path id: it stops being scheduled immediately (removed from the pool
+// before its socket is touched, so no in-flight Next() call can hand it out after this
+// returns), the relay is told via a best-effort PATH_DROP so it doesn't keep scheduling
+// return traffic onto it for the full PathDeadTimeout, and its socket is closed (which also
+// unblocks and exits its read loop). Safe to call concurrently with Run and AddPath.
+// Typically driven by a platform NetworkCallback.onLost (see mobile/mobile.go).
+func (t *ClientTunnel) DropPath(id uint8, reason string) error {
+	p := t.removePath(id)
+	if p == nil {
+		return fmt.Errorf("bond: no such path %d", id)
+	}
+	if payload, err := marshalCBOR(PathDropPayload{PathID: id, Reason: reason}); err == nil {
+		if pkt, err := sealControl(t.sess, proto.TypePathDrop, t.sessionIndex, id, payload); err == nil {
+			_, _ = p.conn.Write(pkt)
+		}
+	}
+	p.state.Store(int32(sched.StateDead))
+	_ = p.conn.Close()
+	return nil
+}
+
+// Run pumps packets across all paths until ctx is cancelled or a fatal (whole-tunnel) error
+// occurs. A single path's socket failing is not fatal here -- see spawnPathLoops -- only
+// t.dev (the TUN device) misbehaving is: without it there is no tunnel regardless of how
+// many paths are healthy.
+func (t *ClientTunnel) Run(ctx context.Context) error {
+	t.runCtx.Store(&ctx)
+	fatalCh := make(chan error, 2)
+
+	go func() { fatalCh <- t.tunToNet(ctx) }()
+	go func() { fatalCh <- t.drainReorderToTun(ctx) }()
 	go t.maintenanceLoop(ctx)
-	for _, p := range paths {
-		p := p
-		go func() { errCh <- t.pathReadLoop(ctx, p) }()
-		go t.probeLoop(ctx, p)
+	for _, p := range t.Paths() {
+		t.spawnPathLoops(ctx, p)
 	}
 
 	select {
 	case <-ctx.Done():
 		t.closeAll()
-		<-errCh
 		return ctx.Err()
-	case err := <-errCh:
+	case err := <-fatalCh:
 		t.closeAll()
 		return err
 	}
