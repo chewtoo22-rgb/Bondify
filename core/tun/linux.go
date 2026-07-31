@@ -14,12 +14,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ConfigureLinux brings a TUN interface up with the given local address (CIDR form, e.g.
+// Configure brings a TUN interface up with the given local address (CIDR form, e.g.
 // "10.77.0.2/24") and, if addRoutes is non-empty, routes those CIDRs through it. It shells
 // out to the `ip` command rather than reimplementing rtnetlink, deliberately: this is
 // exactly what wg-quick itself does, it's auditable in a `strace`, and it avoids pulling in
-// a netlink dependency for what is a handful of one-shot setup calls, not a hot path.
-func ConfigureLinux(ifName string, localCIDR string, routes []string) error {
+// a netlink dependency for what is a handful of one-shot setup calls, not a hot path. See
+// core/tun/windows.go's Configure for the Windows equivalent (same name, same signature).
+func Configure(ifName string, localCIDR string, routes []string) error {
 	if err := run("ip", "link", "set", "dev", ifName, "up"); err != nil {
 		return fmt.Errorf("tun: link up: %w", err)
 	}

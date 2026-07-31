@@ -41,27 +41,35 @@ jobs:
       - name: go vet (host arch only)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: go vet ./...
+      # go vet cross-compiled: the default vet step above only typechecks linux-tagged
+      # files (its build context is the host). Windows has its own build-tagged files as
+      # of phase 6 (core/tun/windows.go, desktop/cmd/bondify/tray_windows.go) that
+      # otherwise never get statically checked in CI at all.
+      - name: go vet (windows)
+        if: matrix.goos == 'windows'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go vet ./...
       - name: Build core (platform-agnostic package)
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build ./core/...
-      # relay/ and desktop/cmd's main packages currently call core/tun's Linux-only
-      # helpers (ConfigureLinux, EgressDevice) directly -- Windows support (wintun, tray,
-      # IP_UNICAST_IF egress binding) is phase 6 scope per ARCHITECTURE.md and isn't
-      # implemented yet, so only build these command binaries for linux today. core/ above
-      # still builds for every target, which is what actually proves the engine itself
-      # stays platform-agnostic.
-      - name: Build relay (linux only for now; see comment above)
+      # relay/ is server-side and stays Linux-only by design (ARCHITECTURE.md's phase plan
+      # scopes Windows to the desktop *client*, phase 6). desktop/cmd, as of phase 6, has
+      # real Windows support (wintun via core/tun/windows.go's IP_UNICAST_IF egress
+      # pinning + netsh interface config, plus a native tray icon) and builds for both.
+      - name: Build relay (linux only -- server-side, see comment above)
         if: matrix.goos == 'linux'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build ./relay/...
-      - name: Build desktop CLI (linux only for now; see comment above)
-        if: matrix.goos == 'linux'
+      - name: Build desktop CLI (linux + windows; see comment above)
+        if: matrix.goos == 'linux' || matrix.goos == 'windows'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}

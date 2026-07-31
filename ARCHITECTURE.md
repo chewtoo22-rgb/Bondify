@@ -453,3 +453,57 @@ reporting, no account, no default relay logging; reproducible builds.
   compiles/links/packages without lying about it; it does not and cannot prove the app
   behaves correctly on a real device, survives Doze, or actually bonds two radios for more
   throughput than either alone. That verification is real future work, not done here.
+- **`core/tun`'s Linux-only `Configure`/`EgressDevice`/`AddHostRoute`/`DelRoute`/
+  `DialUDPViaDevice` gained real Windows counterparts (`core/tun/windows.go`), same names
+  and signatures.** `desktop/cmd/bondify/main.go` was written once, calling these
+  platform-agnostically, and now cross-compiles and `go vet`s clean for `windows/amd64` in
+  CI (it previously only built for `linux`; see the CI job's comment for why relay/ stays
+  Linux-only by design instead). Windows has no `SO_BINDTODEVICE`; `DialUDPViaDevice`'s
+  Windows implementation pins a path's egress adapter with the `IP_UNICAST_IF` sockopt
+  instead, per ARCHITECTURE.md §3.2. Two Windows-specific details worth flagging: (1)
+  `IP_UNICAST_IF` is documented by Microsoft as wanting its interface-index argument in
+  network (big-endian) byte order, unlike most sockopts and unlike IPv6's
+  `IPV6_UNICAST_IF` -- handled by an explicit `htonl`-style byte reversal, valid because
+  every architecture Windows ships on today is little-endian; (2) `EgressDevice` has no
+  `ip route get`-equivalent CLI command to shell out to, so it calls the Win32
+  `GetBestInterfaceEx` API directly instead.
+- **Windows tray icon is raw Win32 (`desktop/cmd/bondify/tray_windows.go`), not a
+  third-party systray library.** Consistent with the rest of the codebase's no-CGO,
+  stdlib-plus-`golang.org/x/sys`-only approach: `golang.org/x/sys/windows` has bindings for
+  syscalls/sockets/services but not GUI/shell APIs, so `RegisterClassExW`,
+  `Shell_NotifyIconW`, and the handful of others needed are loaded directly via
+  `syscall`-style `LazyDLL`/`NewProc` calls, with `NOTIFYICONDATAW`/`WNDCLASSEXW`/`MSG`
+  struct layouts declared by hand against their documented Win32 ABI field order and sizes.
+  This is real, intended-to-work code (it type-checks, `go vet`s, and cross-compiles
+  cleanly under `GOOS=windows` in CI) but its actual runtime behavior -- does the icon
+  render, does the popup menu track the cursor correctly, does double-click really open a
+  browser -- has not been exercised even once, because no Windows session of any kind
+  (real machine, VM, or emulator) exists in this project's build sandbox. See README's
+  "Verified so far (Phase 6)" section.
+- **Deviation from §3.2's "admin-elevated service + unelevated tray UI over a named
+  pipe" design.** `desktop/windows/install.ps1` and the tray icon instead run as a single
+  elevated process (the scheduled task it registers runs `bondify.exe` itself with
+  `RunLevel Highest`), with no separate service process or named-pipe IPC layer. The
+  split-process design is real future work, not abandoned: it's a materially larger surface
+  (service lifecycle, an IPC protocol, its own auth/ACLs on the pipe) that this sandbox has
+  no way to validate any more than the single-process version it replaced for now -- since
+  neither can be run for real here, the simpler one was chosen, on the theory that fewer
+  unverified moving parts is strictly better until an actual Windows test pass exists to
+  tell the two apart. The phase 6 gate itself (install time, UAC-prompt count) doesn't
+  distinguish between the two designs either way.
+- **What phase 6's gate actually needed vs. what this environment could verify.**
+  ARCHITECTURE.md §5's gate is "Windows install-to-bonded < 60s, one UAC prompt" -- both
+  halves are end-to-end UX properties of a real Windows session (a real UAC dialog, a real
+  wintun adapter coming up, a real wall-clock timer) that this Linux sandbox, with no
+  Windows machine, VM, or emulator available, cannot produce or observe. Per this project's
+  standing rule, that gate is **not claimed as passed**. What *was* done for real: every
+  new/changed Go file (`core/tun/windows.go`, `desktop/cmd/bondify/{main,tray_windows,
+  tray_other}.go`) cross-compiles cleanly with `CGO_ENABLED=0` for `windows/amd64` and
+  `windows/arm64`, passes `go vet` under `GOOS=windows`, and the full existing Linux-side
+  test suite (`go test ./... -race`) and `golangci-lint` still pass unchanged, proving the
+  Windows-specific additions didn't regress anything already verified. `desktop/windows/
+  install.ps1` is real, deliberately-written installation logic (self-elevation, file
+  placement, a scheduled task, and a post-install diagnostics poll that times itself against
+  the 60s bar) but has never actually run on Windows. None of that substitutes for the real
+  gate; it's the same honest ceiling phase 5 hit for Android, for the same underlying
+  reason (no target OS available here at all).

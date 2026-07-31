@@ -284,6 +284,46 @@ not the bonded-throughput comparison, not the screen-off survival window, not ev
 "does the VPN permission dialog work and does traffic actually flow" smoke test. That's real
 outstanding work for whoever picks this up with access to an actual phone.
 
+## Verified so far (Phase 6)
+
+Phase 6 is the Windows desktop client: `desktop/cmd/bondify` (the same binary Linux already
+used) now builds and runs on Windows too, via real `core/tun/windows.go` counterparts to
+every Linux-only networking call it makes (`wintun` through the existing cross-platform
+`core/tun.Create`, `IP_UNICAST_IF` egress pinning in place of `SO_BINDTODEVICE`, `netsh`
+in place of `ip` for address/route setup), plus a native Win32 tray icon
+(`desktop/cmd/bondify/tray_windows.go`) and a self-elevating installer
+(`desktop/windows/install.ps1`).
+
+**Read this section as narrowly as it's written.** ARCHITECTURE.md §5's actual gate is
+"Windows install-to-bonded < 60s, one UAC prompt" — that needs a real Windows session (a
+real UAC prompt, a real wintun adapter, a real wall clock), and this project's build
+sandbox is Linux-only with no Windows machine, VM, or emulator available at all. **That
+gate is not claimed as passed.** What's below is what could genuinely be verified without
+one, no more:
+
+- `core/tun/windows.go`, and `desktop/cmd/bondify`'s three files (`main.go` — now fully
+  platform-agnostic, no more Linux-only assumption — `tray_windows.go`, `tray_other.go`)
+  cross-compile cleanly with `CGO_ENABLED=0` for `windows/amd64` and `windows/arm64`, and
+  pass `go vet` under `GOOS=windows`. CI's `build` matrix does the same on every PR.
+- The full pre-existing Linux-side test suite (`go test ./... -race`) and
+  `golangci-lint run` both still pass unchanged, confirming the Windows-specific additions
+  didn't regress anything already gate-verified in phases 1–4.
+- `desktop/windows/install.ps1` is real, intended-to-work installation logic — a
+  self-elevation block (the source of the gate's "one UAC prompt"), file placement, a
+  `wintun.dll` fetch, a logon scheduled task for autostart, and a post-install poll of the
+  same `/api/v1/diagnostics` endpoint every other platform already exposes, timed against
+  the 60s bar — but it has never been run.
+
+**Known gap, honestly stated:** nothing in this phase has executed on an actual Windows
+system. Not the UAC prompt, not the tray icon actually rendering or its menu actually
+working, not the installer script, not a single bonded packet. The raw Win32 tray code in
+particular (`Shell_NotifyIconW`, hand-declared `NOTIFYICONDATAW`/`WNDCLASSEXW` struct
+layouts) is the least-verifiable piece in the codebase: it type-checks and cross-compiles,
+which is a real but weak signal — a struct-layout or calling-convention mistake in code
+like this typically only surfaces as a runtime crash, which nothing here can catch. All of
+that is real outstanding work for whoever picks this up with access to an actual Windows
+machine.
+
 ## Scheduler tiers
 
 Pass `-scheduler <name>` to either binary to pick the tier (default `round-robin`):
@@ -295,7 +335,9 @@ documented tradeoff that Tier 4 exists to fix.
 ## Phase plan
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) §5 for the full table with gates. Short version:
-Phases 0–4 are done and verified. Phase 5 (Android) has a real, building app and gomobile
-bridge, but its actual gate (bonded throughput, screen-off survival) needs a real device and
-has not been verified — see "Verified so far (Phase 5)" above. Phase 6 (Desktop) is next
-after that.
+Phases 0–4 are done and verified. Phase 5 (Android) and Phase 6 (Windows desktop) each have
+real, building/cross-compiling code, but their actual gates (bonded throughput/screen-off
+survival on Android; install-to-bonded time/UAC-prompt count on Windows) need a real device
+or a real Windows session respectively and have not been verified — see "Verified so far
+(Phase 5)" and "Verified so far (Phase 6)" above. Phase 7 (traffic classification, budgets,
+split tunnel) is next after that.
