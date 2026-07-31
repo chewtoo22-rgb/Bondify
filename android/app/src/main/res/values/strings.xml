@@ -15,4 +15,5 @@
     <string name="status_error">Error: %1$s</string>
     <string name="battery_optimization_prompt">For Bondify to stay bonded with the screen off, allow it to ignore battery optimizations.</string>
     <string name="battery_optimization_action">Allow</string>
+    <string name="hint_configure_on_main_screen">Set up a relay on the main screen first</string>
 </resources>

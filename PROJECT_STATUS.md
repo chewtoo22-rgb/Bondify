@@ -152,6 +152,10 @@ Branch: `agent/android-path-lifecycle`
 3. Multi-socket-per-path experiments for high-BDP links.
 4. PairBond and desktop share mode.
 5. Full live diagnostics UI and accessible onboarding.
+6. Cover-screen (Z Flip-style foldable) compact status/connect view: `MainActivity` now
+   switches to a narrower layout below a heuristic width threshold (`CoverScreen.kt`) so it
+   stays usable when One UI continues it onto the front display, but the threshold and the
+   continuity behavior itself are unverified on a real device.
 
 AI integration is intentionally deferred until the tunnel, lifecycle, and release gates are
 dependable. Likely later uses include configuration guidance, anomaly explanation, scheduler

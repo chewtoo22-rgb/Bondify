@@ -284,6 +284,12 @@ not the bonded-throughput comparison, not the screen-off survival window, not ev
 "does the VPN permission dialog work and does traffic actually flow" smoke test. That's real
 outstanding work for whoever picks this up with access to an actual phone.
 
+`MainActivity` also switches to a compact, field-free layout below a heuristic window-width
+threshold (`android/app/.../CoverScreen.kt`) so it degrades usefully if One UI continues it
+onto a foldable's cover screen (e.g. the Z Flip line) instead of blocking it outright. The
+width threshold and the continuity behavior itself are both unverified against a real
+device — see the P2 backlog in PROJECT_STATUS.md.
+
 ## Scheduler tiers
 
 Pass `-scheduler <name>` to either binary to pick the tier (default `round-robin`):

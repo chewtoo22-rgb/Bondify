@@ -20,9 +20,16 @@
         android:theme="@style/Theme.Bondify"
         android:supportsRtl="true">
 
+        <!-- resizeableActivity="true" is what lets One UI's cover-screen continuity (the
+             Z Flip line's front display) keep this activity running, resized, when the phone
+             is closed, instead of blocking it with an "app isn't optimized" message. It
+             defaults to true at this targetSdk already; kept explicit because it's load-
+             bearing for MainActivity's compact layout (see CoverScreen.kt) and unverified on
+             a real device. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:resizeableActivity="true"
             android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

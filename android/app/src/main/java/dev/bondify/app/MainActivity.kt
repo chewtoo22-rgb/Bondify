@@ -24,11 +24,11 @@ import mobile.Mobile
  */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var relayAddrInput: EditText
-    private lateinit var relayPubKeyInput: EditText
+    private var relayAddrInput: EditText? = null
+    private var relayPubKeyInput: EditText? = null
     private lateinit var connectButton: Button
     private lateinit var statusText: TextView
-    private lateinit var myKeyText: TextView
+    private var myKeyText: TextView? = null
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -42,7 +42,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+        val compact = CoverScreen.isCompactWidth(resources.configuration.screenWidthDp)
+        setContentView(if (compact) R.layout.activity_main_compact else R.layout.activity_main)
 
         relayAddrInput = findViewById(R.id.relayAddrInput)
         relayPubKeyInput = findViewById(R.id.relayPubKeyInput)
@@ -77,27 +78,46 @@ class MainActivity : AppCompatActivity() {
             Prefs.setClientKey(prefs, key)
         }
         val pub = Mobile.publicKeyFor(Prefs.clientKey(prefs)!!)
-        myKeyText.text = getString(R.string.label_my_pubkey, pub)
+        myKeyText?.text = getString(R.string.label_my_pubkey, pub)
     }
 
     private fun loadSavedConfig() {
         val prefs = getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
-        relayAddrInput.setText(prefs.getString(Prefs.KEY_RELAY_ADDR, ""))
-        relayPubKeyInput.setText(prefs.getString(Prefs.KEY_RELAY_PUBKEY, ""))
+        relayAddrInput?.setText(prefs.getString(Prefs.KEY_RELAY_ADDR, ""))
+        relayPubKeyInput?.setText(prefs.getString(Prefs.KEY_RELAY_PUBKEY, ""))
     }
 
+    /**
+     * The compact cover-screen layout has no address/pubkey fields (typing on a 3.4" screen
+     * isn't practical), so it can only ever connect with whatever was last saved from the
+     * full-size layout -- never write empty values back to prefs in that case.
+     */
     private fun requestConnect() {
-        val relayAddr = relayAddrInput.text.toString().trim()
-        val relayPubKey = relayPubKeyInput.text.toString().trim()
+        val prefs = getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
+        val addrInput = relayAddrInput
+        val pubKeyInput = relayPubKeyInput
+        val relayAddr: String
+        val relayPubKey: String
+        if (addrInput != null && pubKeyInput != null) {
+            relayAddr = addrInput.text.toString().trim()
+            relayPubKey = pubKeyInput.text.toString().trim()
+            prefs.edit()
+                .putString(Prefs.KEY_RELAY_ADDR, relayAddr)
+                .putString(Prefs.KEY_RELAY_PUBKEY, relayPubKey)
+                .apply()
+        } else {
+            relayAddr = prefs.getString(Prefs.KEY_RELAY_ADDR, "").orEmpty()
+            relayPubKey = prefs.getString(Prefs.KEY_RELAY_PUBKEY, "").orEmpty()
+        }
         if (relayAddr.isEmpty() || relayPubKey.isEmpty()) {
-            Toast.makeText(this, "Enter a relay address and public key", Toast.LENGTH_SHORT).show()
+            val message = if (addrInput == null) {
+                getString(R.string.hint_configure_on_main_screen)
+            } else {
+                "Enter a relay address and public key"
+            }
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
             return
         }
-        val prefs = getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
-        prefs.edit()
-            .putString(Prefs.KEY_RELAY_ADDR, relayAddr)
-            .putString(Prefs.KEY_RELAY_PUBKEY, relayPubKey)
-            .apply()
 
         val consent = VpnService.prepare(this)
         if (consent != null) {
