@@ -56,7 +56,7 @@ func main() {
 		log.Fatalf("relay: ip pool: %v", err)
 	}
 	gwCIDR := fmt.Sprintf("%s/%d", pool.Gateway(), pool.Prefix())
-	if err := tun.ConfigureLinux(*tunName, gwCIDR, nil); err != nil {
+	if err := tun.Configure(*tunName, gwCIDR, nil); err != nil {
 		log.Fatalf("relay: configure tun: %v", err)
 	}
 	log.Printf("relay: tun %s up, gateway %s, pool %s", *tunName, pool.Gateway(), *poolCIDR)

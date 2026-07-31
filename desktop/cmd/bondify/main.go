@@ -1,8 +1,12 @@
-// Command bondify is Bondify's Linux CLI client. Phase 2 scope: multi-path (one UDP socket
-// per configured local address), Noise_IK handshake on path 0, PATH_ADD for the rest,
-// round-robin scheduling, reordering, per-path probing. The desktop tray UI and Windows
-// wintun support land in phase 6; this binary is also the foundation for the Linux path of
-// that later work (see ARCHITECTURE.md §4 repo layout: desktop/cmd/bondify).
+// Command bondify is Bondify's desktop CLI client, for Linux and (as of phase 6) Windows:
+// multi-path (one UDP socket per configured local address), Noise_IK handshake on path 0,
+// PATH_ADD for the rest, round-robin scheduling, reordering, per-path probing. All of the
+// logic in this file is platform-agnostic; the actual TUN/routing/socket-pinning calls it
+// makes (tun.Create, tun.EgressDevice, tun.AddHostRoute, tun.Configure, and
+// bond.PathSpec.Device's use of tun.DialUDPViaDevice) are implemented once per platform in
+// core/tun (linux.go / windows.go) behind identical signatures -- see those files for the
+// Windows-specific pieces (IP_UNICAST_IF egress pinning, wintun adapter configuration via
+// `netsh`) and desktop/cmd/bondify/tray_windows.go for the Windows tray icon.
 package main
 
 import (
@@ -92,8 +96,9 @@ func main() {
 	for _, a := range strings.Split(*localAddrs, ",") {
 		if a = strings.TrimSpace(a); a != "" {
 			// "ip" or "ip@device" -- @device pins the socket to that physical interface
-			// (SO_BINDTODEVICE), required once more than one path reaches the same
-			// relay address; see core/tun/linux.go's DialUDPViaDevice.
+			// (SO_BINDTODEVICE on Linux, IP_UNICAST_IF on Windows), required once more
+			// than one path reaches the same relay address; see core/tun's
+			// DialUDPViaDevice (linux.go / windows.go).
 			spec := bond.PathSpec{}
 			if idx := strings.IndexByte(a, '@'); idx >= 0 {
 				spec.LocalAddr = a[:idx]
@@ -147,19 +152,21 @@ func main() {
 			routes = append(routes, r)
 		}
 	}
-	if err := tun.ConfigureLinux(*tunName, localCIDR, routes); err != nil {
+	if err := tun.Configure(*tunName, localCIDR, routes); err != nil {
 		log.Fatalf("client: configure tun: %v", err)
 	}
 	log.Printf("client: tun %s up at %s, routes=%v", *tunName, localCIDR, routes)
 
 	go statsLoop(ctx, t)
 
+	var diagURL string
 	if *diagAddr != "" {
 		srv, err := diag.NewServer(*diagAddr, func() any { return t.Diagnostics() })
 		if err != nil {
 			log.Printf("client: warning: diagnostics endpoint disabled: %v", err)
 		} else {
-			log.Printf("client: diagnostics endpoint listening on http://%s/api/v1/diagnostics", srv.Addr())
+			diagURL = fmt.Sprintf("http://%s/api/v1/diagnostics", srv.Addr())
+			log.Printf("client: diagnostics endpoint listening on %s", diagURL)
 			go func() {
 				if err := srv.Serve(); err != nil {
 					log.Printf("client: diagnostics endpoint error: %v", err)
@@ -171,6 +178,11 @@ func main() {
 			}()
 		}
 	}
+
+	// No-op on every platform except Windows (tray_windows.go / tray_other.go); the tray
+	// icon's Quit action calls stop, the same signal.NotifyContext CancelFunc SIGINT/SIGTERM
+	// use, so it drives the identical graceful-shutdown path as Ctrl+C.
+	go startTray(stop, diagURL)
 
 	if err := t.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("client: tunnel error: %v", err)
