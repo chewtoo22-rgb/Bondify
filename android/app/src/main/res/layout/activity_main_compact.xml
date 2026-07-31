@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Shown instead of activity_main.xml when MainActivity detects a cover-screen-width
-     window (see CoverScreen.kt). No relay-address/pubkey fields -- typing on a 3.4" cover
+     window (see CoverScreen.kt). No relay-address/pubkey fields: typing on a 3.4" cover
      screen isn't practical, so this view only surfaces status and a connect/disconnect
      toggle for a relay already configured on the main screen. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
