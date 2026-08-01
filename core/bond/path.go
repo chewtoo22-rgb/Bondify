@@ -48,6 +48,13 @@ type Path struct {
 	state          atomic.Int32 // sched.State
 	lastProbeAckAt atomic.Int64 // UnixNano; 0 = never
 
+	// loopsStarted guards against launching this path's read/probe loop goroutines twice.
+	// A path can enter the pool from two different callers racing each other -- Run's own
+	// startup loop over the initial path set, and a concurrent runtime AddPath call adding
+	// the same path just before Run reaches it (see ClientTunnel.spawnPathLoops) -- and
+	// only one of them may win.
+	loopsStarted atomic.Bool
+
 	// conn is set only on the client side: each client path owns a dedicated UDP socket
 	// bound to a specific physical uplink. The relay has no per-path socket -- it
 	// demultiplexes every path of every session through one shared listener (relay.go)

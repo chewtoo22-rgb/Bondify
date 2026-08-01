@@ -1,0 +1,188 @@
+package bond
+
+import (
+	"context"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/chewtoo22-rgb/bondify/core/crypto"
+)
+
+// mustRelay starts a real *Relay listening on loopback with a live UDP control plane
+// (ServeUDP running), but no TUN device -- AddPath/DropPath only exercise the handshake and
+// control-plane paths (handlePathAdd/handlePathDrop), never actual data forwarding, so a nil
+// tun.Device is enough for these tests to run against the genuine relay code, not a hand-
+// rolled stand-in.
+func mustRelay(t *testing.T) (*Relay, crypto.Keypair) {
+	t.Helper()
+	relayKP, err := crypto.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("relay keypair: %v", err)
+	}
+	r, err := NewRelay(RelayConfig{
+		ListenAddr: "127.0.0.1:0",
+		RelayKey:   relayKP,
+		PoolCIDR:   "10.77.0.0/24",
+		MTU:        1280,
+	}, nil)
+	if err != nil {
+		t.Fatalf("new relay: %v", err)
+	}
+	go func() { _ = r.ServeUDP() }()
+	t.Cleanup(func() { _ = r.conn.Close() })
+	return r, relayKP
+}
+
+// mustClientTunnel completes a real Noise_IK handshake with r's genuine handshake handler
+// and returns the resulting *ClientTunnel, not attached to any TUN device.
+func mustClientTunnel(t *testing.T, r *Relay, relayKP crypto.Keypair) (*ClientTunnel, uint32) {
+	t.Helper()
+	clientKP, err := crypto.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("client keypair: %v", err)
+	}
+	tun, resp, err := DialHandshake(context.Background(), ClientConfig{
+		RelayAddr:    r.conn.LocalAddr().(*net.UDPAddr).String(),
+		RelayPubKey:  relayKP.Public,
+		ClientKey:    clientKP,
+		HandshakeTO:  time.Second,
+		HandshakeTry: 3,
+	})
+	if err != nil {
+		t.Fatalf("dial handshake: %v", err)
+	}
+	t.Cleanup(func() {
+		for _, p := range tun.Paths() {
+			_ = p.conn.Close()
+		}
+	})
+	return tun, resp.SessionIndex
+}
+
+func relaySessionFor(r *Relay, sessionIndex uint32) *relaySession {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.byIndex[sessionIndex]
+}
+
+func TestClientTunnelAddPathBeforeRunDoesNotSpawnLoopsYet(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, _ := mustClientTunnel(t, r, relayKP)
+
+	if err := tun.AddPath(context.Background(), 1, PathSpec{}); err != nil {
+		t.Fatalf("AddPath: %v", err)
+	}
+	p1 := tun.pathByID(1)
+	if p1 == nil {
+		t.Fatal("path 1 not registered")
+	}
+	t.Cleanup(func() { _ = p1.conn.Close() })
+	if p1.loopsStarted.Load() {
+		t.Fatal("AddPath started read/probe loops before Run ever started")
+	}
+	if got := len(tun.schedPaths()); got != 2 {
+		t.Fatalf("schedPaths() = %d, want 2", got)
+	}
+}
+
+func TestClientTunnelAddPathAfterRunStartsServingImmediately(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, sessionIndex := mustClientTunnel(t, r, relayKP)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Simulate Run() having already started, without needing a real TUN device (Run's own
+	// packet-pump goroutines are irrelevant to AddPath/DropPath's control-plane behavior).
+	tun.runCtx.Store(&ctx)
+
+	if err := tun.AddPath(context.Background(), 1, PathSpec{}); err != nil {
+		t.Fatalf("AddPath: %v", err)
+	}
+	p1 := tun.pathByID(1)
+	if p1 == nil {
+		t.Fatal("path 1 not registered")
+	}
+	if !p1.loopsStarted.Load() {
+		t.Fatal("AddPath did not start path 1's read/probe loops on an already-running tunnel")
+	}
+
+	sess := relaySessionFor(r, sessionIndex)
+	if sess == nil {
+		t.Fatal("relay never created a session for this handshake")
+	}
+	if sess.pathByID(1) == nil {
+		t.Fatal("relay never registered path 1 via PATH_ADD")
+	}
+}
+
+func TestClientTunnelAddPathRejectsDuplicateID(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, _ := mustClientTunnel(t, r, relayKP)
+
+	if err := tun.AddPath(context.Background(), 0, PathSpec{}); err == nil {
+		t.Fatal("expected an error re-registering path 0, got nil")
+	}
+}
+
+func TestClientTunnelDropPathIsResilientAndTellsTheRelay(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, sessionIndex := mustClientTunnel(t, r, relayKP)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tun.runCtx.Store(&ctx)
+
+	if err := tun.AddPath(context.Background(), 1, PathSpec{}); err != nil {
+		t.Fatalf("AddPath: %v", err)
+	}
+	if got := len(tun.Paths()); got != 2 {
+		t.Fatalf("paths before drop = %d, want 2", got)
+	}
+
+	if err := tun.DropPath(1, "test teardown"); err != nil {
+		t.Fatalf("DropPath: %v", err)
+	}
+	if got := len(tun.Paths()); got != 1 {
+		t.Fatalf("paths after drop = %d, want 1", got)
+	}
+	if got := len(tun.schedPaths()); got != 1 {
+		t.Fatalf("schedPaths() after drop = %d, want 1 (dropped path must stop being scheduled)", got)
+	}
+
+	sess := relaySessionFor(r, sessionIndex)
+	if sess == nil {
+		t.Fatal("relay never created a session for this handshake")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && sess.pathByID(1) != nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if sess.pathByID(1) != nil {
+		t.Fatal("relay still has path 1 registered after PATH_DROP -- it will keep scheduling return traffic onto a dead path until PathDeadTimeout")
+	}
+
+	// Dropping one path must not have killed the session: a fresh AddPath still works.
+	if err := tun.AddPath(context.Background(), 2, PathSpec{}); err != nil {
+		t.Fatalf("AddPath after drop: %v", err)
+	}
+}
+
+func TestClientTunnelDropPathUnknownIDErrors(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, _ := mustClientTunnel(t, r, relayKP)
+
+	if err := tun.DropPath(99, "x"); err == nil {
+		t.Fatal("expected an error dropping an unregistered path, got nil")
+	}
+}
+
+func TestPathLoopsStartedCASIsOneShot(t *testing.T) {
+	p := NewPath(1, nil)
+	if !p.loopsStarted.CompareAndSwap(false, true) {
+		t.Fatal("first CompareAndSwap(false, true) should succeed")
+	}
+	if p.loopsStarted.CompareAndSwap(false, true) {
+		t.Fatal("second CompareAndSwap(false, true) should fail -- loops must only start once")
+	}
+}

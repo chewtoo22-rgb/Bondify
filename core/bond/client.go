@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chewtoo22-rgb/bondify/core/classify"
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
 	"github.com/chewtoo22-rgb/bondify/core/proto"
 	"github.com/chewtoo22-rgb/bondify/core/reorder"
@@ -59,6 +60,13 @@ type ClientConfig struct {
 	// on outgoing SPEED-mode traffic. Redundancy scales with observed loss and is zero at
 	// zero loss, so leaving this on costs nothing on a clean path.
 	FEC bool
+	// Classify enables Tier 5 traffic-class routing (ARCHITECTURE.md §2.1.5, core/classify):
+	// LATENCY pins to the single lowest-RTT path, REALTIME duplicates like REDUNDANT mode
+	// but only for packets that need it, BULK gets a 90% congestion-window headroom cap, and
+	// INTERACTIVE (and anything unclassifiable) falls through to the configured Scheduler
+	// tier unchanged. Ignored when Mode is ModeRedundant, which already overrides per-packet
+	// routing tunnel-wide. Off by default so existing throughput gates are unaffected.
+	Classify bool
 }
 
 // DialClient performs the Noise_IK handshake on path 0, then registers any additional
@@ -194,6 +202,9 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 		rtx:          newRetransmitQueue(),
 		paths:        []*Path{path0},
 		mode:         cfg.Mode,
+		classify:     cfg.Classify,
+		handshakeTO:  handshakeTO,
+		handshakeTry: tries,
 	}
 	t.schedPathView.Store([]sched.Path{path0})
 	if cfg.FEC {
@@ -334,9 +345,10 @@ type ClientTunnel struct {
 	rtx        *retransmitQueue
 	ackSendMu  sync.Mutex
 
-	mode    Mode
-	fecSend *fecSender    // nil when FEC is disabled
-	fecRecv *fecGenBuffer // nil when FEC is disabled
+	mode     Mode
+	classify bool          // Tier 5 traffic-class routing; see ClientConfig.Classify
+	fecSend  *fecSender    // nil when FEC is disabled
+	fecRecv  *fecGenBuffer // nil when FEC is disabled
 
 	pathsMu sync.RWMutex
 	paths   []*Path
@@ -347,6 +359,21 @@ type ClientTunnel struct {
 	pathErrs []error
 
 	sendGSN atomic.Uint64
+
+	// handshakeTO/handshakeTry are the resolved (default-filled) values DialHandshake used
+	// for path 0 and its initial cfg.Paths, kept around so a later runtime AddPath call
+	// uses the same knobs instead of silently falling back to different ones.
+	handshakeTO  time.Duration
+	handshakeTry int
+
+	// runCtx holds the context.Context passed to Run, once Run has actually started, so a
+	// concurrent AddPath call knows whether to spawn a new path's read/probe loops itself
+	// (Run is already past the point where it would pick the path up on its own) or leave
+	// that to Run's own startup loop (Run hasn't started iterating paths yet). A nil Load
+	// means Run has not started. atomic.Pointer, not atomic.Value, because context.Context
+	// is an interface -- atomic.Value panics if concrete types differ across Store calls,
+	// which an interface field can't guarantee the way a pointer to a fixed type can.
+	runCtx atomic.Pointer[context.Context]
 
 	Stats Stats
 }
@@ -373,6 +400,40 @@ func (t *ClientTunnel) Paths() []*Path {
 	return out
 }
 
+// pathByID returns the path with the given ID, or nil if none is currently registered.
+func (t *ClientTunnel) pathByID(id uint8) *Path {
+	t.pathsMu.RLock()
+	defer t.pathsMu.RUnlock()
+	for _, p := range t.paths {
+		if p.id == id {
+			return p
+		}
+	}
+	return nil
+}
+
+// removePath takes id out of the schedulable pool (and the plain path list) and returns it,
+// or returns nil if id wasn't registered. It does not touch the path's socket or state --
+// callers decide what that means (DropPath closes it deliberately; a failed read loop has
+// already had its socket fail on its own).
+func (t *ClientTunnel) removePath(id uint8) *Path {
+	t.pathsMu.Lock()
+	defer t.pathsMu.Unlock()
+	for i, p := range t.paths {
+		if p.id != id {
+			continue
+		}
+		t.paths = append(t.paths[:i:i], t.paths[i+1:]...)
+		view := make([]sched.Path, len(t.paths))
+		for j, path := range t.paths {
+			view[j] = path
+		}
+		t.schedPathView.Store(view)
+		return p
+	}
+	return nil
+}
+
 // PathErrors returns any errors encountered adding paths during DialClient. A non-empty
 // result means the tunnel is running with fewer paths than requested, not that it's down.
 func (t *ClientTunnel) PathErrors() []error { return t.pathErrs }
@@ -382,26 +443,102 @@ func (t *ClientTunnel) schedPaths() []sched.Path {
 	return view
 }
 
-// Run pumps packets across all paths until ctx is cancelled or a fatal error occurs.
-func (t *ClientTunnel) Run(ctx context.Context) error {
-	paths := t.Paths()
-	errCh := make(chan error, len(paths)+2)
+// runningContext returns the context.Context passed to Run, and whether Run has actually
+// started (as opposed to a caller adding paths before ever calling Run -- see AddPath).
+func (t *ClientTunnel) runningContext() (context.Context, bool) {
+	v := t.runCtx.Load()
+	if v == nil {
+		return nil, false
+	}
+	return *v, true
+}
 
-	go func() { errCh <- t.tunToNet(ctx) }()
-	go func() { errCh <- t.drainReorderToTun(ctx) }()
+// spawnPathLoops launches p's read and probe loops exactly once, no matter how many callers
+// race to spawn them (Run's own startup loop over the initial path set, and a concurrent
+// AddPath registering the same path just before Run reaches it). A read-loop failure that
+// isn't just ctx being cancelled (the path's socket erroring, or DropPath closing it on
+// purpose) removes p from the schedulable pool instead of tearing down the whole tunnel --
+// other paths, if any, keep the session alive, and AddPath can register a replacement.
+func (t *ClientTunnel) spawnPathLoops(ctx context.Context, p *Path) {
+	if !p.loopsStarted.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		if err := t.pathReadLoop(ctx, p); err != nil && ctx.Err() == nil {
+			t.removePath(p.id)
+		}
+	}()
+	go t.probeLoop(ctx, p)
+}
+
+// AddPath registers a new uplink on an already-established session: it dials (or, on
+// platforms like Android where spec.Conn is pre-bound/pre-protected, adopts) a socket,
+// completes the PATH_ADD handshake, and -- if Run has already started -- immediately spawns
+// this path's read/probe loops so it starts carrying traffic right away rather than waiting
+// for a Run call that has already happened. Safe to call concurrently with Run, DropPath,
+// and other AddPath calls. id must not already be registered; a previously DropPath'd id may
+// be reused (crypto.Session's per-path nonce counters and replay windows are keyed by id and
+// persist for the life of the session, so reuse is not a nonce-reuse risk).
+//
+// This is the piece PROJECT_STATUS.md's Android backlog calls "a thread-safe runtime AddPath
+// API" -- see mobile/mobile.go and android/app's BondifyVpnService.kt for the platform side
+// that calls it from a ConnectivityManager.NetworkCallback.
+func (t *ClientTunnel) AddPath(ctx context.Context, id uint8, spec PathSpec) error {
+	if t.pathByID(id) != nil {
+		return fmt.Errorf("bond: path %d already registered", id)
+	}
+	if err := t.addPath(ctx, id, spec, t.handshakeTO, t.handshakeTry); err != nil {
+		return err
+	}
+	if runCtx, ok := t.runningContext(); ok {
+		if p := t.pathByID(id); p != nil {
+			t.spawnPathLoops(runCtx, p)
+		}
+	}
+	return nil
+}
+
+// DropPath retires path id: it stops being scheduled immediately (removed from the pool
+// before its socket is touched, so no in-flight Next() call can hand it out after this
+// returns), the relay is told via a best-effort PATH_DROP so it doesn't keep scheduling
+// return traffic onto it for the full PathDeadTimeout, and its socket is closed (which also
+// unblocks and exits its read loop). Safe to call concurrently with Run and AddPath.
+// Typically driven by a platform NetworkCallback.onLost (see mobile/mobile.go).
+func (t *ClientTunnel) DropPath(id uint8, reason string) error {
+	p := t.removePath(id)
+	if p == nil {
+		return fmt.Errorf("bond: no such path %d", id)
+	}
+	if payload, err := marshalCBOR(PathDropPayload{PathID: id, Reason: reason}); err == nil {
+		if pkt, err := sealControl(t.sess, proto.TypePathDrop, t.sessionIndex, id, payload); err == nil {
+			_, _ = p.conn.Write(pkt)
+		}
+	}
+	p.state.Store(int32(sched.StateDead))
+	_ = p.conn.Close()
+	return nil
+}
+
+// Run pumps packets across all paths until ctx is cancelled or a fatal (whole-tunnel) error
+// occurs. A single path's socket failing is not fatal here -- see spawnPathLoops -- only
+// t.dev (the TUN device) misbehaving is: without it there is no tunnel regardless of how
+// many paths are healthy.
+func (t *ClientTunnel) Run(ctx context.Context) error {
+	t.runCtx.Store(&ctx)
+	fatalCh := make(chan error, 2)
+
+	go func() { fatalCh <- t.tunToNet(ctx) }()
+	go func() { fatalCh <- t.drainReorderToTun(ctx) }()
 	go t.maintenanceLoop(ctx)
-	for _, p := range paths {
-		p := p
-		go func() { errCh <- t.pathReadLoop(ctx, p) }()
-		go t.probeLoop(ctx, p)
+	for _, p := range t.Paths() {
+		t.spawnPathLoops(ctx, p)
 	}
 
 	select {
 	case <-ctx.Done():
 		t.closeAll()
-		<-errCh
 		return ctx.Err()
-	case err := <-errCh:
+	case err := <-fatalCh:
 		t.closeAll()
 		return err
 	}
@@ -436,9 +573,12 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 		}
 		for i := 0; i < n; i++ {
 			payload := bufs[i][tun.IOOffset : tun.IOOffset+sizes[i]]
-			if t.mode == ModeRedundant {
+			switch {
+			case t.mode == ModeRedundant:
 				t.sendRedundant(payload)
-			} else {
+			case t.classify:
+				t.sendClassified(payload)
+			default:
 				t.sendSpeed(payload)
 			}
 		}
@@ -452,7 +592,75 @@ func (t *ClientTunnel) sendSpeed(payload []byte) {
 	if path == nil {
 		return // no eligible path right now; drop (queueing is a later refinement)
 	}
-	p := path.(*Path)
+	t.sendOnPath(path.(*Path), payload)
+}
+
+// sendPinned is Tier 5's LATENCY handling (ARCHITECTURE.md §2.1.5): pinned to the single
+// lowest-RTT ACTIVE path, bypassing the configured scheduler tier entirely. LATENCY traffic
+// must never split across paths -- reordering delay from a second path would undo the whole
+// point of routing it specially.
+func (t *ClientTunnel) sendPinned(payload []byte) {
+	p := lowestRTTActivePath(t.Paths())
+	if p == nil {
+		return // no eligible path right now; drop, same as sendSpeed's own case
+	}
+	t.sendOnPath(p, payload)
+}
+
+// bulkHeadroomFraction is ARCHITECTURE.md §2.1.5's "hard 90% headroom cap" for BULK-class
+// traffic: it never lets a path's in-flight bytes reach this fraction of its congestion
+// window, reserving the rest for LATENCY/REALTIME traffic that might need the same path.
+const bulkHeadroomFraction = 0.90
+
+// sendSpeedCapped is sendSpeed with the scheduler restricted to paths that still have
+// headroom fraction of slack in their congestion window -- Tier 5's BULK handling.
+func (t *ClientTunnel) sendSpeedCapped(payload []byte, headroom float64) {
+	path := t.sched.Next(capByHeadroom(t.schedPaths(), headroom), len(payload))
+	if path == nil {
+		// Every eligible path is already within its reserved headroom -- expected under a
+		// sustained BULK-only load, not an error. Drop rather than fall back to an uncapped
+		// choice: falling back would defeat the cap's entire purpose exactly when it matters
+		// most (a saturating transfer). Queueing is a later refinement, same as sendSpeed.
+		return
+	}
+	t.sendOnPath(path.(*Path), payload)
+}
+
+// capByHeadroom returns the subset of paths with in-flight bytes still under headroom
+// fraction of their congestion window.
+func capByHeadroom(paths []sched.Path, headroom float64) []sched.Path {
+	out := make([]sched.Path, 0, len(paths))
+	for _, p := range paths {
+		if float64(p.InFlight()) < float64(p.CWND())*headroom {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// sendClassified is Tier 5's dispatcher: classify.Classify picks a class for payload, and
+// each class routes differently (ARCHITECTURE.md §2.1.5). Only reached when t.classify is
+// set -- ModeRedundant still takes priority tunnel-wide (see tunToNet), matching how
+// REDUNDANT mode already overrides the scheduler tier for every packet, not just some.
+func (t *ClientTunnel) sendClassified(payload []byte) {
+	switch classify.Classify(payload) {
+	case classify.Realtime:
+		// "Duplicates on the two best paths" is exactly what REDUNDANT mode's sendRedundant
+		// already does (same DupFactor, same best-by-RTT selection, same dedup-via-replay-
+		// window mechanics) -- reused directly rather than re-implemented for one class.
+		t.sendRedundant(payload)
+	case classify.Latency:
+		t.sendPinned(payload)
+	case classify.Interactive:
+		t.sendSpeed(payload)
+	default: // classify.Bulk, classify.Unknown
+		t.sendSpeedCapped(payload, bulkHeadroomFraction)
+	}
+}
+
+// sendOnPath is sendSpeed/sendPinned/sendSpeedCapped's shared body once a path has already
+// been chosen: stamp GSN/PSN/FEC generation info, seal, send, and track for retransmission.
+func (t *ClientTunnel) sendOnPath(p *Path, payload []byte) {
 	gsn := t.sendGSN.Add(1) - 1
 	psn := p.NextSendPSN()
 

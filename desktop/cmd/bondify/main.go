@@ -41,6 +41,7 @@ func main() {
 		scheduler   = flag.String("scheduler", "round-robin", "scheduling tier: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
 		mode        = flag.String("mode", "speed", "sending mode: speed (scheduler-picked single path per packet) or redundant (duplicate onto 2 paths)")
 		fec         = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on speed-mode traffic; redundancy scales with observed loss, but even at zero loss still copies every packet into a generation buffer, so it's opt-in rather than a free default")
+		classifyFl  = flag.Bool("classify", false, "Tier 5 traffic-class routing: LATENCY pins to the single lowest-RTT path, REALTIME duplicates like -mode redundant but only for traffic that needs it, BULK gets a 90% congestion-window headroom cap, INTERACTIVE and everything else use -scheduler unchanged; ignored in -mode redundant")
 	)
 	flag.Parse()
 
@@ -123,6 +124,12 @@ func main() {
 		log.Printf("client: warning: -fec has no effect in -mode redundant; disabling it")
 		*fec = false
 	}
+	if *classifyFl && sendMode == bond.ModeRedundant {
+		// See ClientConfig.Classify's doc comment: REDUNDANT mode already overrides
+		// per-packet routing tunnel-wide, so -classify would sit permanently ignored.
+		log.Printf("client: warning: -classify has no effect in -mode redundant; disabling it")
+		*classifyFl = false
+	}
 
 	t, cfg, err := bond.DialClient(ctx, bond.ClientConfig{
 		RelayAddr:   *relayAddr,
@@ -132,6 +139,7 @@ func main() {
 		Scheduler:   *scheduler,
 		Mode:        sendMode,
 		FEC:         *fec,
+		Classify:    *classifyFl,
 	}, dev, *mtu)
 	if err != nil {
 		log.Fatalf("client: handshake failed: %v", err)
