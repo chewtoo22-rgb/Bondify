@@ -26,22 +26,21 @@ import (
 
 func main() {
 	var (
-		listen      = flag.String("listen", ":51820", "UDP listen address")
-		poolCIDR    = flag.String("pool", "10.77.0.0/24", "tunnel IP pool (relay owns the first address)")
-		tunName     = flag.String("tun", "bondify0", "TUN device name")
-		mtu         = flag.Int("mtu", 1408, "tunnel MTU pushed to clients (payload MTU, not wire MTU)")
-		keyFile     = flag.String("key-file", "/etc/bondify/relay.key", "path to relay private key (generated if absent)")
-		dnsList     = flag.String("dns", "1.1.1.1,9.9.9.9", "comma-separated DNS servers pushed to clients")
-		natIface    = flag.String("nat-iface", "", "if set, enable ip_forward + MASQUERADE(pool -> this interface) for internet egress")
-		keepalive   = flag.Int("keepalive", 15, "NAT keepalive interval seconds, pushed to clients")
-		diagAddr    = flag.String("diag-addr", "127.0.0.1:9091", "localhost address to serve live JSON diagnostics on, one entry per connected session (GET /api/v1/diagnostics); empty disables it")
-		scheduler   = flag.String("scheduler", "round-robin", "scheduling tier for the relay's own return traffic: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
-		mode        = flag.String("mode", "speed", "sending mode for the relay's own return traffic: speed or redundant")
-		fec         = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on the relay's own return traffic; opt-in since it copies every packet into a generation buffer even at zero loss")
-		classify    = flag.Bool("classify", false, "Tier 5 traffic-class routing on the relay's own return traffic (see the client's -classify flag for the per-class routing); ignored in -mode redundant")
-		bulkLimit   = flag.Int64("bulk-limit-bps", 0, "optional return-traffic BULK pacing ceiling in bits per second; enables -classify, 0 is unlimited")
-		bulkQueue   = flag.Int("bulk-queue-packets", bond.DefaultBulkQueuePackets, "maximum copied BULK packets waiting for pacing/headroom; queue-full drops are reported in diagnostics")
-		egressQueue = flag.Int("egress-queue-packets", bond.DefaultEgressQueuePackets, "maximum return SPEED packets waiting for scheduler congestion-window capacity; queue-full drops are reported in diagnostics")
+		listen    = flag.String("listen", ":51820", "UDP listen address")
+		poolCIDR  = flag.String("pool", "10.77.0.0/24", "tunnel IP pool (relay owns the first address)")
+		tunName   = flag.String("tun", "bondify0", "TUN device name")
+		mtu       = flag.Int("mtu", 1408, "tunnel MTU pushed to clients (payload MTU, not wire MTU)")
+		keyFile   = flag.String("key-file", "/etc/bondify/relay.key", "path to relay private key (generated if absent)")
+		dnsList   = flag.String("dns", "1.1.1.1,9.9.9.9", "comma-separated DNS servers pushed to clients")
+		natIface  = flag.String("nat-iface", "", "if set, enable ip_forward + MASQUERADE(pool -> this interface) for internet egress")
+		keepalive = flag.Int("keepalive", 15, "NAT keepalive interval seconds, pushed to clients")
+		diagAddr  = flag.String("diag-addr", "127.0.0.1:9091", "localhost address to serve live JSON diagnostics on, one entry per connected session (GET /api/v1/diagnostics); empty disables it")
+		scheduler = flag.String("scheduler", "round-robin", "scheduling tier for the relay's own return traffic: round-robin, weighted-goodput, min-rtt-cwnd, hol-aware")
+		mode      = flag.String("mode", "speed", "sending mode for the relay's own return traffic: speed or redundant")
+		fec       = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on the relay's own return traffic; opt-in since it copies every packet into a generation buffer even at zero loss")
+		classify  = flag.Bool("classify", false, "Tier 5 traffic-class routing on the relay's own return traffic (see the client's -classify flag for the per-class routing); ignored in -mode redundant")
+		bulkLimit = flag.Int64("bulk-limit-bps", 0, "optional return-traffic BULK pacing ceiling in bits per second; enables -classify, 0 is unlimited")
+		bulkQueue = flag.Int("bulk-queue-packets", bond.DefaultBulkQueuePackets, "maximum copied BULK packets waiting for pacing/headroom; queue-full drops are reported in diagnostics")
 	)
 	flag.Parse()
 
@@ -109,9 +108,6 @@ func main() {
 	if *bulkQueue < 1 {
 		log.Fatalf("relay: -bulk-queue-packets must be >= 1")
 	}
-	if *egressQueue < 1 {
-		log.Fatalf("relay: -egress-queue-packets must be >= 1")
-	}
 	if *bulkLimit > 0 {
 		if sendMode == bond.ModeRedundant {
 			log.Fatalf("relay: -bulk-limit-bps requires -mode speed")
@@ -123,19 +119,18 @@ func main() {
 	}
 
 	r, err := bond.NewRelay(bond.RelayConfig{
-		ListenAddr:         *listen,
-		RelayKey:           key,
-		PoolCIDR:           *poolCIDR,
-		DNS:                dns,
-		MTU:                *mtu,
-		KeepAlive:          *keepalive,
-		Scheduler:          *scheduler,
-		Mode:               sendMode,
-		FEC:                *fec,
-		Classify:           *classify,
-		BulkBudget:         bulkBudget,
-		BulkQueuePackets:   *bulkQueue,
-		EgressQueuePackets: *egressQueue,
+		ListenAddr:       *listen,
+		RelayKey:         key,
+		PoolCIDR:         *poolCIDR,
+		DNS:              dns,
+		MTU:              *mtu,
+		KeepAlive:        *keepalive,
+		Scheduler:        *scheduler,
+		Mode:             sendMode,
+		FEC:              *fec,
+		Classify:         *classify,
+		BulkBudget:       bulkBudget,
+		BulkQueuePackets: *bulkQueue,
 	}, dev)
 	if err != nil {
 		log.Fatalf("relay: init: %v", err)

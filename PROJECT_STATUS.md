@@ -191,8 +191,8 @@ transplanted.
 
 - Repaired the Tier 5 foundation rather than layering a pacer over a false signal:
   `Path.InFlight()` had never been incremented anywhere, so the advertised 90% BULK
-  headroom cap was permanently comparing zero against CWND. Successful logical DATA writes
-  now enter in-flight accounting before the socket write can race an ACK; authenticated
+  headroom cap was permanently comparing zero against CWND. Classified BULK writes now enter
+  in-flight accounting before the socket write can race an ACK; authenticated
   cumulative/SACK removal, retransmission eviction/exhaustion, and failed writes release the
   original path's bytes.
 - Added `core/budget`: a deterministic, cancellation-aware byte-rate token bucket and a
@@ -201,11 +201,11 @@ transplanted.
   sent counts, and scheduler waits exposed under diagnostics `bulk_pacing`. The channel is
   never closed, eliminating Grok's `Enqueue`-versus-`Close` panic race; cancellation also
   interrupts both the limiter and scheduler retry.
-- Put ordinary SPEED traffic behind a separate bounded scheduler-retry queue as well. Once
-  in-flight accounting became real, every scheduler could correctly return no path at CWND;
-  the old caller immediately dropped in that state despite its own contract saying to queue
-  and retry. `egress_queue` diagnostics expose its depth, waits, and overload drops, while a
-  send lock keeps capacity checks and FEC generation slots coherent across class workers.
+- Scope the new accounting to classified BULK occupancy. An initial attempt to hard-window
+  all ordinary SPEED traffic exposed that the simplified probe-fed controller and delayed
+  ACK path are not a general congestion-control replacement and regressed the established
+  Phase 2/4 gates. Other classes consume BULK's reserved headroom without being charged to
+  it; a send lock keeps capacity checks and FEC generation slots coherent across workers.
 - Integrated the BULK pacer symmetrically into client and relay. `-bulk-limit-bps` is an
   optional per-direction bit-rate ceiling and enables classification; zero leaves rate
   unlimited while still queueing for the real 90% headroom cap. `-bulk-queue-packets`

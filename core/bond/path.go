@@ -66,6 +66,9 @@ type Path struct {
 	sendPSN atomic.Uint32
 	recvPSN atomic.Uint32
 
+	// inflight is the classified BULK occupancy reserved against CWND. Applying this
+	// experimental controller as a hard window to every packet regresses the already-gated
+	// unclassified data plane; Phase 7 only needs real accounting for its BULK reserve.
 	inflight atomic.Int64
 	rttMin   atomic.Int64
 	peerRTT  atomic.Int64

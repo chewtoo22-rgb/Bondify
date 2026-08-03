@@ -89,9 +89,7 @@ Add destinations with `-bypass-routes cidr,cidr` or disable the curated set with
 `-bulk-limit-bps <bits/sec>` on either binary enables it automatically and paces that
 direction's BULK traffic. Use the flag on both client and relay when both upload and download
 need a ceiling. Queue depth, scheduler waits, and the bounded queue's overload drops appear
-under `aggregate.bulk_pacing` in live diagnostics. Ordinary SPEED traffic also uses a
-bounded scheduler-retry queue (tunable with `-egress-queue-packets`) now that the congestion
-window is enforced; its telemetry is `aggregate.egress_queue`.
+under `aggregate.bulk_pacing` in live diagnostics.
 
 ## Live diagnostics
 
@@ -341,17 +339,17 @@ Phase 7 now has an implementation for all three scoped pieces:
 
 - `core/classify` retains the deliberately conservative DSCP/port classifier and symmetric
   LATENCY/REALTIME/INTERACTIVE/BULK routing on client and relay.
-- BULK's 90% congestion-window reserve now uses real outstanding-byte accounting. Packets
+- BULK's 90% congestion-window reserve now uses real outstanding-byte accounting. BULK packets
   are recorded before the socket write (closing a fast-ACK race), released on authenticated
   ACK or bounded retransmission eviction, and queued while no path has headroom instead of
   being silently discarded. `core/budget` adds an optional cancellable byte-rate token
   bucket. Rate limiting waits; only the bounded copied-packet queue can drop, and every such
   drop is counted in diagnostics.
-- The same retry primitive now sits behind ordinary SPEED scheduling. Making in-flight
-  accounting real means every scheduler can legitimately reach CWND; the retry queue turns
-  that state into backpressure instead of regressing the existing throughput gates through
-  immediate packet loss. Concurrent class workers serialize FEC slot assignment and the
-  final capacity check.
+- Accounting is deliberately charged only to classified BULK. Applying the simplified
+  controller as a hard window to every packet regresses the established unclassified
+  throughput/loss gates; other classes consume the reserved headroom without being forced
+  through the experimental BULK limiter. Concurrent class workers still serialize FEC slot
+  assignment and the final BULK capacity check.
 - Desktop `-default-route` mode installs more-specific physical routes for the curated
   IPv4 LAN/private/link-local/CGNAT set and `-bypass-routes`. Existing exact routes are left
   alone and only routes Bondify added are removed at normal shutdown. Linux route parsing is

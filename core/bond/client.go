@@ -76,9 +76,6 @@ type ClientConfig struct {
 	// congestion-window headroom. Zero selects DefaultBulkQueuePackets. Exhaustion is the
 	// pacer's only overload drop and is exported in diagnostics rather than being silent.
 	BulkQueuePackets int
-	// EgressQueuePackets bounds ordinary SPEED traffic waiting for a scheduler path to
-	// regain congestion-window capacity. Zero selects DefaultEgressQueuePackets.
-	EgressQueuePackets int
 }
 
 // DialClient performs the Noise_IK handshake on path 0, then registers any additional
@@ -112,9 +109,6 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 	}
 	if cfg.BulkQueuePackets < 0 {
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: bulk queue packets must be >= 0")
-	}
-	if cfg.EgressQueuePackets < 0 {
-		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: egress queue packets must be >= 0")
 	}
 	if cfg.BulkBudget.BytesPerSecond > 0 && (!cfg.Classify || cfg.Mode == ModeRedundant) {
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: bulk budget requires classification in speed mode")
@@ -227,8 +221,7 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 		mode:         cfg.Mode,
 		classify:     cfg.Classify,
 		bulkBudget:   cfg.BulkBudget,
-		bulkQueue:    resolvedQueuePackets(cfg.BulkQueuePackets, DefaultBulkQueuePackets),
-		egressQueue:  resolvedQueuePackets(cfg.EgressQueuePackets, DefaultEgressQueuePackets),
+		bulkQueue:    resolvedBulkQueuePackets(cfg.BulkQueuePackets),
 		handshakeTO:  handshakeTO,
 		handshakeTry: tries,
 	}
@@ -381,12 +374,10 @@ type ClientTunnel struct {
 	fecSend  *fecSender    // nil when FEC is disabled
 	fecRecv  *fecGenBuffer // nil when FEC is disabled
 
-	bulkBudget  budget.Config
-	bulkQueue   int
-	bulkPacer   atomic.Pointer[budget.Pacer]
-	egressQueue int
-	egressPacer atomic.Pointer[budget.Pacer]
-	sendMu      sync.Mutex
+	bulkBudget budget.Config
+	bulkQueue  int
+	bulkPacer  atomic.Pointer[budget.Pacer]
+	sendMu     sync.Mutex
 
 	pathsMu sync.RWMutex
 	paths   []*Path
@@ -563,7 +554,7 @@ func (t *ClientTunnel) DropPath(id uint8, reason string) error {
 // many paths are healthy.
 func (t *ClientTunnel) Run(ctx context.Context) error {
 	t.runCtx.Store(&ctx)
-	if err := t.startPacers(ctx); err != nil {
+	if err := t.startBulkPacer(ctx); err != nil {
 		return err
 	}
 	fatalCh := make(chan error, 2)
@@ -586,19 +577,12 @@ func (t *ClientTunnel) Run(ctx context.Context) error {
 }
 
 func (t *ClientTunnel) closeAll() {
-	t.closeAllPacers()
-	_ = t.dev.Close()
-	for _, p := range t.Paths() {
-		_ = p.conn.Close()
-	}
-}
-
-func (t *ClientTunnel) closeAllPacers() {
 	if p := t.bulkPacer.Load(); p != nil {
 		p.Close()
 	}
-	if p := t.egressPacer.Load(); p != nil {
-		p.Close()
+	_ = t.dev.Close()
+	for _, p := range t.Paths() {
+		_ = p.conn.Close()
 	}
 }
 
@@ -630,12 +614,7 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 			case t.classify:
 				t.sendClassified(payload)
 			default:
-				queue := t.egressPacer.Load()
-				if queue != nil {
-					_ = queue.Enqueue(payload)
-				} else {
-					t.sendSpeed(payload)
-				}
+				t.sendSpeed(payload)
 			}
 		}
 	}
@@ -654,7 +633,7 @@ func (t *ClientTunnel) trySendSpeed(payload []byte) bool {
 	if path == nil {
 		return false
 	}
-	t.sendOnPathLocked(path.(*Path), payload)
+	t.sendOnPathLocked(path.(*Path), payload, false)
 	return true
 }
 
@@ -691,7 +670,7 @@ func (t *ClientTunnel) trySendSpeedCapped(payload []byte, headroom float64) bool
 	if path == nil {
 		return false
 	}
-	t.sendOnPathLocked(path.(*Path), payload)
+	t.sendOnPathLocked(path.(*Path), payload, true)
 	return true
 }
 
@@ -722,10 +701,6 @@ func (t *ClientTunnel) sendClassified(payload []byte) {
 	case classify.Latency:
 		t.sendPinned(payload)
 	case classify.Interactive:
-		if p := t.egressPacer.Load(); p != nil {
-			_ = p.Enqueue(payload)
-			return
-		}
 		t.sendSpeed(payload)
 	default: // classify.Bulk, classify.Unknown
 		if p := t.bulkPacer.Load(); p != nil {
@@ -741,10 +716,10 @@ func (t *ClientTunnel) sendClassified(payload []byte) {
 func (t *ClientTunnel) sendOnPath(p *Path, payload []byte) {
 	t.sendMu.Lock()
 	defer t.sendMu.Unlock()
-	t.sendOnPathLocked(p, payload)
+	t.sendOnPathLocked(p, payload, false)
 }
 
-func (t *ClientTunnel) sendOnPathLocked(p *Path, payload []byte) {
+func (t *ClientTunnel) sendOnPathLocked(p *Path, payload []byte, accountBulk bool) {
 	gsn := t.sendGSN.Add(1) - 1
 	psn := p.NextSendPSN()
 
@@ -773,8 +748,10 @@ func (t *ClientTunnel) sendOnPathLocked(p *Path, payload []byte) {
 	if err != nil {
 		return
 	}
-	p.addInFlight(len(payload))
-	t.rtx.Track(gsn, payload, header.Flags, p.id, true, time.Now())
+	if accountBulk {
+		p.addInFlight(len(payload))
+	}
+	t.rtx.Track(gsn, payload, header.Flags, p.id, true, accountBulk, time.Now())
 	if _, err := p.conn.Write(pkt); err != nil {
 		t.rtx.Forget(gsn)
 		return // this path's socket errored; let its read loop notice and report
@@ -810,7 +787,7 @@ func (t *ClientTunnel) sendRedundant(payload []byte) {
 		return
 	}
 	gsn := t.sendGSN.Add(1) - 1
-	t.rtx.Track(gsn, payload, 0, 0, false, time.Now())
+	t.rtx.Track(gsn, payload, 0, 0, false, false, time.Now())
 	sent := false
 	for i, p := range paths {
 		psn := p.NextSendPSN()

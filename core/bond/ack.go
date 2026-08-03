@@ -237,6 +237,7 @@ type pendingPacket struct {
 	Flags             uint8
 	OriginalPathID    uint8
 	OriginalPathKnown bool
+	InFlightAccounted bool
 	SentAt            time.Time
 	LastSent          time.Time
 	Retries           int
@@ -272,6 +273,7 @@ func (q *retransmitQueue) Track(
 	flags uint8,
 	pathID uint8,
 	pathKnown bool,
+	accountInFlight bool,
 	now time.Time,
 ) {
 	cp := append([]byte(nil), payload...)
@@ -287,6 +289,7 @@ func (q *retransmitQueue) Track(
 		Flags:             flags & retransmitSemanticFlags,
 		OriginalPathID:    pathID,
 		OriginalPathKnown: pathKnown,
+		InFlightAccounted: accountInFlight,
 		SentAt:            now,
 		LastSent:          now,
 	}
@@ -458,6 +461,7 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 			Flags:             pkt.Flags,
 			OriginalPathID:    pkt.OriginalPathID,
 			OriginalPathKnown: pkt.OriginalPathKnown,
+			InFlightAccounted: pkt.InFlightAccounted,
 			SentAt:            pkt.SentAt,
 			LastSent:          pkt.LastSent,
 			Retries:           pkt.Retries,
@@ -477,7 +481,7 @@ func (q *retransmitQueue) deleteLocked(gsn uint64) {
 	}
 	q.bytes -= len(pkt.Payload)
 	delete(q.packets, gsn)
-	if pkt.OriginalPathKnown && q.release != nil {
+	if pkt.InFlightAccounted && pkt.OriginalPathKnown && q.release != nil {
 		q.release(pkt.OriginalPathID, len(pkt.Payload))
 	}
 }

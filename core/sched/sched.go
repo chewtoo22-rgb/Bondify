@@ -65,7 +65,9 @@ type Path interface {
 	ID() uint8
 	State() State
 	Role() Role
-	// InFlight and CWND are byte counts, gated by core/cc's per-path congestion window.
+	// InFlight and CWND are byte counts. Bondify currently charges classified BULK traffic
+	// to InFlight; other classes consume the reserve rather than being hard-windowed by the
+	// still-experimental controller.
 	InFlight() int64
 	CWND() int64
 	// RTTMin is the path's windowed-minimum RTT (PROTOCOL.md §6's scheduling metric --

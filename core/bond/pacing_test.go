@@ -29,11 +29,11 @@ func TestRelayBudgetRequiresClassifiedSpeedMode(t *testing.T) {
 	}
 }
 
-func TestResolvedQueuePackets(t *testing.T) {
-	if got := resolvedQueuePackets(0, DefaultBulkQueuePackets); got != DefaultBulkQueuePackets {
+func TestResolvedBulkQueuePackets(t *testing.T) {
+	if got := resolvedBulkQueuePackets(0); got != DefaultBulkQueuePackets {
 		t.Fatalf("resolved zero queue = %d, want default %d", got, DefaultBulkQueuePackets)
 	}
-	if got := resolvedQueuePackets(17, DefaultBulkQueuePackets); got != 17 {
+	if got := resolvedBulkQueuePackets(17); got != 17 {
 		t.Fatalf("resolved explicit queue = %d, want 17", got)
 	}
 }
