@@ -76,6 +76,9 @@ type ClientConfig struct {
 	// congestion-window headroom. Zero selects DefaultBulkQueuePackets. Exhaustion is the
 	// pacer's only overload drop and is exported in diagnostics rather than being silent.
 	BulkQueuePackets int
+	// EgressQueuePackets bounds ordinary SPEED traffic waiting for a scheduler path to
+	// regain congestion-window capacity. Zero selects DefaultEgressQueuePackets.
+	EgressQueuePackets int
 }
 
 // DialClient performs the Noise_IK handshake on path 0, then registers any additional
@@ -109,6 +112,9 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 	}
 	if cfg.BulkQueuePackets < 0 {
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: bulk queue packets must be >= 0")
+	}
+	if cfg.EgressQueuePackets < 0 {
+		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: egress queue packets must be >= 0")
 	}
 	if cfg.BulkBudget.BytesPerSecond > 0 && (!cfg.Classify || cfg.Mode == ModeRedundant) {
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: bulk budget requires classification in speed mode")
@@ -221,7 +227,8 @@ func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, Handsh
 		mode:         cfg.Mode,
 		classify:     cfg.Classify,
 		bulkBudget:   cfg.BulkBudget,
-		bulkQueue:    resolvedBulkQueuePackets(cfg.BulkQueuePackets),
+		bulkQueue:    resolvedQueuePackets(cfg.BulkQueuePackets, DefaultBulkQueuePackets),
+		egressQueue:  resolvedQueuePackets(cfg.EgressQueuePackets, DefaultEgressQueuePackets),
 		handshakeTO:  handshakeTO,
 		handshakeTry: tries,
 	}
@@ -374,9 +381,12 @@ type ClientTunnel struct {
 	fecSend  *fecSender    // nil when FEC is disabled
 	fecRecv  *fecGenBuffer // nil when FEC is disabled
 
-	bulkBudget budget.Config
-	bulkQueue  int
-	bulkPacer  atomic.Pointer[budget.Pacer]
+	bulkBudget  budget.Config
+	bulkQueue   int
+	bulkPacer   atomic.Pointer[budget.Pacer]
+	egressQueue int
+	egressPacer atomic.Pointer[budget.Pacer]
+	sendMu      sync.Mutex
 
 	pathsMu sync.RWMutex
 	paths   []*Path
@@ -553,7 +563,7 @@ func (t *ClientTunnel) DropPath(id uint8, reason string) error {
 // many paths are healthy.
 func (t *ClientTunnel) Run(ctx context.Context) error {
 	t.runCtx.Store(&ctx)
-	if err := t.startBulkPacer(ctx); err != nil {
+	if err := t.startPacers(ctx); err != nil {
 		return err
 	}
 	fatalCh := make(chan error, 2)
@@ -576,12 +586,19 @@ func (t *ClientTunnel) Run(ctx context.Context) error {
 }
 
 func (t *ClientTunnel) closeAll() {
-	if p := t.bulkPacer.Load(); p != nil {
-		p.Close()
-	}
+	t.closeAllPacers()
 	_ = t.dev.Close()
 	for _, p := range t.Paths() {
 		_ = p.conn.Close()
+	}
+}
+
+func (t *ClientTunnel) closeAllPacers() {
+	if p := t.bulkPacer.Load(); p != nil {
+		p.Close()
+	}
+	if p := t.egressPacer.Load(); p != nil {
+		p.Close()
 	}
 }
 
@@ -613,7 +630,12 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 			case t.classify:
 				t.sendClassified(payload)
 			default:
-				t.sendSpeed(payload)
+				queue := t.egressPacer.Load()
+				if queue != nil {
+					_ = queue.Enqueue(payload)
+				} else {
+					t.sendSpeed(payload)
+				}
 			}
 		}
 	}
@@ -622,11 +644,18 @@ func (t *ClientTunnel) tunToNet(ctx context.Context) error {
 // sendSpeed sends payload on the scheduler's chosen single path, stamping FEC generation
 // info and FlagFECProtected when FEC is enabled.
 func (t *ClientTunnel) sendSpeed(payload []byte) {
+	_ = t.trySendSpeed(payload)
+}
+
+func (t *ClientTunnel) trySendSpeed(payload []byte) bool {
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
 	path := t.sched.Next(t.schedPaths(), len(payload))
 	if path == nil {
-		return // no eligible path right now; drop (queueing is a later refinement)
+		return false
 	}
-	t.sendOnPath(path.(*Path), payload)
+	t.sendOnPathLocked(path.(*Path), payload)
+	return true
 }
 
 // sendPinned is Tier 5's LATENCY handling (ARCHITECTURE.md §2.1.5): pinned to the single
@@ -656,11 +685,13 @@ func (t *ClientTunnel) sendSpeedCapped(payload []byte, headroom float64) {
 // false as backpressure and retries; direct test callers retain sendSpeedCapped's legacy
 // fire-and-forget shape.
 func (t *ClientTunnel) trySendSpeedCapped(payload []byte, headroom float64) bool {
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
 	path := t.sched.Next(capByHeadroom(t.schedPaths(), headroom, len(payload)), len(payload))
 	if path == nil {
 		return false
 	}
-	t.sendOnPath(path.(*Path), payload)
+	t.sendOnPathLocked(path.(*Path), payload)
 	return true
 }
 
@@ -691,6 +722,10 @@ func (t *ClientTunnel) sendClassified(payload []byte) {
 	case classify.Latency:
 		t.sendPinned(payload)
 	case classify.Interactive:
+		if p := t.egressPacer.Load(); p != nil {
+			_ = p.Enqueue(payload)
+			return
+		}
 		t.sendSpeed(payload)
 	default: // classify.Bulk, classify.Unknown
 		if p := t.bulkPacer.Load(); p != nil {
@@ -704,6 +739,12 @@ func (t *ClientTunnel) sendClassified(payload []byte) {
 // sendOnPath is sendSpeed/sendPinned/sendSpeedCapped's shared body once a path has already
 // been chosen: stamp GSN/PSN/FEC generation info, seal, send, and track for retransmission.
 func (t *ClientTunnel) sendOnPath(p *Path, payload []byte) {
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
+	t.sendOnPathLocked(p, payload)
+}
+
+func (t *ClientTunnel) sendOnPathLocked(p *Path, payload []byte) {
 	gsn := t.sendGSN.Add(1) - 1
 	psn := p.NextSendPSN()
 
@@ -761,6 +802,9 @@ func (t *ClientTunnel) sendOnPath(p *Path, payload []byte) {
 // GSN<nextExpected check dedups the extra copies at the receiver for free -- see
 // PROTOCOL.md §3's note that replay protection doubles as REDUNDANT-mode dedup.
 func (t *ClientTunnel) sendRedundant(payload []byte) {
+	t.sendMu.Lock()
+	defer t.sendMu.Unlock()
+
 	paths := selectRedundantPaths(t.Paths(), DupFactor)
 	if len(paths) == 0 {
 		return

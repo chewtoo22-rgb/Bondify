@@ -48,6 +48,7 @@ func main() {
 		classifyFl   = flag.Bool("classify", false, "Tier 5 traffic-class routing: LATENCY pins to the single lowest-RTT path, REALTIME duplicates like -mode redundant but only for traffic that needs it, BULK gets a 90% congestion-window headroom cap, INTERACTIVE and everything else use -scheduler unchanged; ignored in -mode redundant")
 		bulkLimit    = flag.Int64("bulk-limit-bps", 0, "optional BULK pacing ceiling in bits per second; enables -classify, 0 is unlimited")
 		bulkQueue    = flag.Int("bulk-queue-packets", bond.DefaultBulkQueuePackets, "maximum copied BULK packets waiting for pacing/headroom; queue-full drops are reported in diagnostics")
+		egressQueue  = flag.Int("egress-queue-packets", bond.DefaultEgressQueuePackets, "maximum SPEED packets waiting for scheduler congestion-window capacity; queue-full drops are reported in diagnostics")
 	)
 	flag.Parse()
 
@@ -143,6 +144,9 @@ func main() {
 	if *bulkQueue < 1 {
 		log.Fatalf("client: -bulk-queue-packets must be >= 1")
 	}
+	if *egressQueue < 1 {
+		log.Fatalf("client: -egress-queue-packets must be >= 1")
+	}
 	if *bulkLimit > 0 {
 		if sendMode == bond.ModeRedundant {
 			log.Fatalf("client: -bulk-limit-bps requires -mode speed")
@@ -154,16 +158,17 @@ func main() {
 	}
 
 	t, cfg, err := bond.DialClient(ctx, bond.ClientConfig{
-		RelayAddr:        *relayAddr,
-		RelayPubKey:      relayPub,
-		ClientKey:        clientKey,
-		Paths:            paths,
-		Scheduler:        *scheduler,
-		Mode:             sendMode,
-		FEC:              *fec,
-		Classify:         *classifyFl,
-		BulkBudget:       bulkBudget,
-		BulkQueuePackets: *bulkQueue,
+		RelayAddr:          *relayAddr,
+		RelayPubKey:        relayPub,
+		ClientKey:          clientKey,
+		Paths:              paths,
+		Scheduler:          *scheduler,
+		Mode:               sendMode,
+		FEC:                *fec,
+		Classify:           *classifyFl,
+		BulkBudget:         bulkBudget,
+		BulkQueuePackets:   *bulkQueue,
+		EgressQueuePackets: *egressQueue,
 	}, dev, *mtu)
 	if err != nil {
 		log.Fatalf("client: handshake failed: %v", err)
@@ -310,6 +315,11 @@ func statsLoop(ctx context.Context, t *bond.ClientTunnel) {
 				log.Printf("client:   bulk queue=%d/%d drops=%d/%dB paced=%dpkt/%dB scheduler_waits=%d rate=%dB/s",
 					pacing.QueueDepth, pacing.QueueCapacity, pacing.QueueDrops, pacing.QueueDropBytes,
 					pacing.SentPackets, pacing.SentBytes, pacing.SchedulerWaits, pacing.Limiter.BytesPerSecond)
+			}
+			if queue := agg.EgressQueue; queue != nil {
+				log.Printf("client:   egress queue=%d/%d drops=%d/%dB sent=%dpkt/%dB scheduler_waits=%d",
+					queue.QueueDepth, queue.QueueCapacity, queue.QueueDrops, queue.QueueDropBytes,
+					queue.SentPackets, queue.SentBytes, queue.SchedulerWaits)
 			}
 		}
 	}

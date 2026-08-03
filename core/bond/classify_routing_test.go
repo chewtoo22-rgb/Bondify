@@ -219,10 +219,10 @@ func TestBulkPacerWaitsForHeadroomAndACKReleasesInFlight(t *testing.T) {
 	tun.classify = true
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := tun.startBulkPacer(ctx); err != nil {
-		t.Fatalf("startBulkPacer: %v", err)
+	if err := tun.startPacers(ctx); err != nil {
+		t.Fatalf("startPacers: %v", err)
 	}
-	defer tun.bulkPacer.Load().Close()
+	defer tun.closeAllPacers()
 	if pacing := tun.Diagnostics().Aggregate.BulkPacing; pacing == nil || pacing.QueueCapacity != DefaultBulkQueuePackets {
 		t.Fatalf("diagnostics bulk_pacing = %+v, want active queue capacity %d", pacing, DefaultBulkQueuePackets)
 	}
@@ -253,6 +253,42 @@ func TestBulkPacerWaitsForHeadroomAndACKReleasesInFlight(t *testing.T) {
 	tun.rtx.Acknowledge(AckPayload{HasCumulative: true, CumulativeGSN: 0}, time.Now())
 	if got := path.InFlight(); got != 0 {
 		t.Fatalf("in-flight after ACK = %d, want 0", got)
+	}
+}
+
+func TestEgressPacerRetriesAtCWNDInsteadOfDropping(t *testing.T) {
+	tun, peers := newSendTestTunnel(t, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := tun.startPacers(ctx); err != nil {
+		t.Fatalf("startPacers: %v", err)
+	}
+	defer tun.closeAllPacers()
+
+	path := tun.paths[0]
+	path.inflight.Store(path.CWND())
+	pkt := buildTCPPacket(443)
+	if err := tun.egressPacer.Load().Enqueue(pkt); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if recvWithin(t, peers[0], 50*time.Millisecond) {
+		t.Fatal("ordinary SPEED packet bypassed the congestion window")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && tun.egressPacer.Load().Snapshot().SchedulerWaits == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if tun.egressPacer.Load().Snapshot().SchedulerWaits == 0 {
+		t.Fatal("egress pacer did not wait for scheduler capacity")
+	}
+
+	path.inflight.Store(0)
+	if !recvWithin(t, peers[0], time.Second) {
+		t.Fatal("queued SPEED packet was not sent after CWND capacity returned")
+	}
+	if queue := tun.Diagnostics().Aggregate.EgressQueue; queue == nil || queue.SentPackets != 1 {
+		t.Fatalf("diagnostics egress_queue = %+v, want one sent packet", queue)
 	}
 }
 

@@ -43,8 +43,9 @@ type RelayConfig struct {
 	Classify bool
 	// BulkBudget and BulkQueuePackets mirror ClientConfig for relay-to-client BULK
 	// traffic. The return direction is the loaded direction for Phase 7's download gate.
-	BulkBudget       budget.Config
-	BulkQueuePackets int
+	BulkBudget         budget.Config
+	BulkQueuePackets   int
+	EgressQueuePackets int
 }
 
 type relaySession struct {
@@ -65,11 +66,13 @@ type relaySession struct {
 	rtx        *retransmitQueue
 	ackSendMu  sync.Mutex
 
-	mode      Mode
-	classify  bool          // Tier 5 traffic-class routing; see RelayConfig.Classify
-	fecSend   *fecSender    // nil when FEC is disabled
-	fecRecv   *fecGenBuffer // nil when FEC is disabled
-	bulkPacer *budget.Pacer
+	mode        Mode
+	classify    bool          // Tier 5 traffic-class routing; see RelayConfig.Classify
+	fecSend     *fecSender    // nil when FEC is disabled
+	fecRecv     *fecGenBuffer // nil when FEC is disabled
+	bulkPacer   *budget.Pacer
+	egressPacer *budget.Pacer
+	sendMu      sync.Mutex
 
 	sendGSN atomic.Uint64
 
@@ -108,11 +111,24 @@ func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnel
 		rs.fecRecv = newFECGenBuffer()
 	}
 	rs.schedPathView.Store([]sched.Path(nil))
-	if cfg.Classify && cfg.Mode != ModeRedundant {
-		p, err := newBulkPacer(r.pacingCtx, cfg.BulkBudget, cfg.BulkQueuePackets, func(pkt []byte) bool {
-			return r.trySendSpeedCapped(rs, pkt, bulkHeadroomFraction)
-		})
+	if cfg.Mode != ModeRedundant {
+		p, err := newPacketPacer(r.pacingCtx, "egress",
+			budget.Config{}, resolvedQueuePackets(cfg.EgressQueuePackets, DefaultEgressQueuePackets),
+			func(pkt []byte) bool { return r.trySendSpeed(rs, pkt) })
 		if err != nil {
+			return nil, err
+		}
+		rs.egressPacer = p
+	}
+	if cfg.Classify && cfg.Mode != ModeRedundant {
+		p, err := newPacketPacer(r.pacingCtx, "bulk", cfg.BulkBudget,
+			resolvedQueuePackets(cfg.BulkQueuePackets, DefaultBulkQueuePackets), func(pkt []byte) bool {
+				return r.trySendSpeedCapped(rs, pkt, bulkHeadroomFraction)
+			})
+		if err != nil {
+			if rs.egressPacer != nil {
+				rs.egressPacer.Close()
+			}
 			return nil, err
 		}
 		rs.bulkPacer = p
@@ -233,6 +249,9 @@ func NewRelay(cfg RelayConfig, dev tun.Device) (*Relay, error) {
 	if cfg.BulkQueuePackets < 0 {
 		return nil, fmt.Errorf("bond: bulk queue packets must be >= 0")
 	}
+	if cfg.EgressQueuePackets < 0 {
+		return nil, fmt.Errorf("bond: egress queue packets must be >= 0")
+	}
 	if cfg.BulkBudget.BytesPerSecond > 0 && (!cfg.Classify || cfg.Mode == ModeRedundant) {
 		return nil, fmt.Errorf("bond: bulk budget requires classification in speed mode")
 	}
@@ -321,6 +340,9 @@ func (r *Relay) Close() {
 			if s.bulkPacer != nil {
 				s.bulkPacer.Close()
 			}
+			if s.egressPacer != nil {
+				s.egressPacer.Close()
+			}
 		}
 		if r.conn != nil {
 			_ = r.conn.Close()
@@ -403,7 +425,11 @@ func (r *Relay) ServeTUN() error {
 			case sess.classify:
 				r.sendClassified(sess, pkt)
 			default:
-				r.sendSpeed(sess, pkt)
+				if sess.egressPacer != nil {
+					_ = sess.egressPacer.Enqueue(pkt)
+				} else {
+					r.sendSpeed(sess, pkt)
+				}
 			}
 		}
 	}
@@ -412,11 +438,18 @@ func (r *Relay) ServeTUN() error {
 // sendSpeed sends pkt on sess's scheduler-chosen single path, stamping FEC generation
 // info and FlagFECProtected when FEC is enabled for this session.
 func (r *Relay) sendSpeed(sess *relaySession, pkt []byte) {
+	_ = r.trySendSpeed(sess, pkt)
+}
+
+func (r *Relay) trySendSpeed(sess *relaySession, pkt []byte) bool {
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
 	path := sess.sched.Next(sess.schedPaths(), len(pkt))
 	if path == nil {
-		return // no eligible path right now; drop
+		return false
 	}
-	r.sendOnPath(sess, path.(*Path), pkt)
+	r.sendOnPathLocked(sess, path.(*Path), pkt)
+	return true
 }
 
 // sendPinned is Tier 5's LATENCY handling on the relay's return traffic; see
@@ -436,11 +469,13 @@ func (r *Relay) sendSpeedCapped(sess *relaySession, pkt []byte, headroom float64
 }
 
 func (r *Relay) trySendSpeedCapped(sess *relaySession, pkt []byte, headroom float64) bool {
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
 	path := sess.sched.Next(capByHeadroom(sess.schedPaths(), headroom, len(pkt)), len(pkt))
 	if path == nil {
 		return false
 	}
-	r.sendOnPath(sess, path.(*Path), pkt)
+	r.sendOnPathLocked(sess, path.(*Path), pkt)
 	return true
 }
 
@@ -454,6 +489,10 @@ func (r *Relay) sendClassified(sess *relaySession, pkt []byte) {
 	case classify.Latency:
 		r.sendPinned(sess, pkt)
 	case classify.Interactive:
+		if sess.egressPacer != nil {
+			_ = sess.egressPacer.Enqueue(pkt)
+			return
+		}
 		r.sendSpeed(sess, pkt)
 	default: // classify.Bulk, classify.Unknown
 		if sess.bulkPacer != nil {
@@ -467,6 +506,12 @@ func (r *Relay) sendClassified(sess *relaySession, pkt []byte) {
 // sendOnPath is sendSpeed/sendPinned/sendSpeedCapped's shared body once a path has already
 // been chosen: stamp GSN/PSN/FEC generation info, seal, send, and track for retransmission.
 func (r *Relay) sendOnPath(sess *relaySession, p *Path, pkt []byte) {
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
+	r.sendOnPathLocked(sess, p, pkt)
+}
+
+func (r *Relay) sendOnPathLocked(sess *relaySession, p *Path, pkt []byte) {
 	addr := p.RemoteAddr()
 	if addr == nil {
 		return
@@ -519,6 +564,9 @@ func (r *Relay) sendOnPath(sess *relaySession, p *Path, pkt []byte) {
 // sendRedundant duplicates pkt, under one shared GSN, onto up to DupFactor distinct
 // healthy paths for sess. See ClientTunnel.sendRedundant for the dedup rationale.
 func (r *Relay) sendRedundant(sess *relaySession, pkt []byte) {
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
+
 	paths := selectRedundantPaths(sess.pathSlice(), DupFactor)
 	if len(paths) == 0 {
 		return
@@ -824,8 +872,13 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 	r.byTunnelIP[tunnelIP.String()] = rs
 	r.byClientKey[clientKey] = rs
 	r.mu.Unlock()
-	if existing != nil && existing.bulkPacer != nil {
-		existing.bulkPacer.Close()
+	if existing != nil {
+		if existing.bulkPacer != nil {
+			existing.bulkPacer.Close()
+		}
+		if existing.egressPacer != nil {
+			existing.egressPacer.Close()
+		}
 	}
 
 	out := make([]byte, proto.OuterPrefixLen+len(respMsg))

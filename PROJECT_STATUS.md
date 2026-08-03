@@ -201,6 +201,11 @@ transplanted.
   sent counts, and scheduler waits exposed under diagnostics `bulk_pacing`. The channel is
   never closed, eliminating Grok's `Enqueue`-versus-`Close` panic race; cancellation also
   interrupts both the limiter and scheduler retry.
+- Put ordinary SPEED traffic behind a separate bounded scheduler-retry queue as well. Once
+  in-flight accounting became real, every scheduler could correctly return no path at CWND;
+  the old caller immediately dropped in that state despite its own contract saying to queue
+  and retry. `egress_queue` diagnostics expose its depth, waits, and overload drops, while a
+  send lock keeps capacity checks and FEC generation slots coherent across class workers.
 - Integrated the BULK pacer symmetrically into client and relay. `-bulk-limit-bps` is an
   optional per-direction bit-rate ceiling and enables classification; zero leaves rate
   unlimited while still queueing for the real 90% headroom cap. `-bulk-queue-packets`

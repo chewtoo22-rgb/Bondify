@@ -73,8 +73,11 @@ type AggregateDiag struct {
 	ReorderForcedReleases uint64  `json:"reorder_forced_releases"`
 	UptimeSec             float64 `json:"uptime_sec"`
 	// BulkPacing is absent when traffic classification is disabled. When present it makes
-	// both configured pacing and the only bounded-queue loss path operator-visible.
+	// configured rate/headroom pacing and its bounded-queue overload visible.
 	BulkPacing *budget.PacerSnapshot `json:"bulk_pacing,omitempty"`
+	// EgressQueue reports ordinary SPEED traffic waiting for Scheduler.Next to regain
+	// congestion-window capacity instead of being silently dropped.
+	EgressQueue *budget.PacerSnapshot `json:"egress_queue,omitempty"`
 }
 
 // SessionDiag is one bonded session's full diagnostics snapshot: scheduler in use, every
@@ -102,6 +105,11 @@ func (t *ClientTunnel) Diagnostics() SessionDiag {
 		snapshot := p.Snapshot()
 		bulkPacing = &snapshot
 	}
+	var egressQueue *budget.PacerSnapshot
+	if p := t.egressPacer.Load(); p != nil {
+		snapshot := p.Snapshot()
+		egressQueue = &snapshot
+	}
 	stats := snapshotStats(&t.Stats)
 	return SessionDiag{
 		SessionIndex: sessionIndexHex(t.sessionIndex),
@@ -122,6 +130,7 @@ func (t *ClientTunnel) Diagnostics() SessionDiag {
 			ReorderForcedReleases: t.reorderBuf.ForcedReleases(),
 			UptimeSec:             time.Since(t.startedAt).Seconds(),
 			BulkPacing:            bulkPacing,
+			EgressQueue:           egressQueue,
 		},
 	}
 }
@@ -150,6 +159,11 @@ func (r *Relay) Diagnostics() RelayDiag {
 			snapshot := s.bulkPacer.Snapshot()
 			bulkPacing = &snapshot
 		}
+		var egressQueue *budget.PacerSnapshot
+		if s.egressPacer != nil {
+			snapshot := s.egressPacer.Snapshot()
+			egressQueue = &snapshot
+		}
 		stats := snapshotStats(&s.Stats)
 		s.pathsMu.RLock()
 		pd := make([]PathDiag, 0, len(s.paths))
@@ -176,6 +190,7 @@ func (r *Relay) Diagnostics() RelayDiag {
 				ReorderForcedReleases: s.reorderBuf.ForcedReleases(),
 				UptimeSec:             time.Since(s.startedAt).Seconds(),
 				BulkPacing:            bulkPacing,
+				EgressQueue:           egressQueue,
 			},
 		}
 	}
