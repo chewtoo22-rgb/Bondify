@@ -23,7 +23,7 @@ must not cause an incompatible protocol change.
 | Phase 4: resilience | REDUNDANT mode, adaptive Reed-Solomon FEC, ACK/SACK and bounded retransmission | Race/unit tests plus real-loss FEC, FEC-off retransmission, and path-death CI gates | Real-device/path-flapping breadth and external security review |
 | Phase 5: Android | Kotlin app, VpnService shell, gomobile AAR build, runtime AddPath/DropPath path churn (see below) | APK compilation in CI; runtime path API covered by real client+relay Go integration tests | No real-device VPN, bonding, churn, or 30-minute screen-off gate has passed |
 | Phase 6: Windows desktop | wintun/tray client, `IP_UNICAST_IF` egress binding, self-elevating installer script | Builds/vets/cross-compiles clean in CI | The actual gate (install-to-bonded < 60s, one UAC prompt) needs a real Windows machine; none available in any sandbox so far |
-| Phase 7: classification/budgets/split tunnel (stabilization candidate) | Symmetric Tier 5 routing, real in-flight/headroom accounting, cancellable bounded BULK pacing + diagnostics, desktop IPv4 bypass routes, mixed-traffic gate | Local build/vet/race tests and Linux/Windows compile checks pass; privileged gate is wired into CI but cannot run in this restricted sandbox | PR CI must pass the real loaded-download/port-22 RTT gate; Windows route runtime and Android split tunnel remain real-device work |
+| Phase 7: classification/budgets/split tunnel | Symmetric Tier 5 routing, real in-flight/headroom accounting, cancellable bounded BULK pacing + diagnostics, desktop IPv4 bypass routes, mixed-traffic gate | Local build/vet/race/cross-platform checks plus the privileged GitHub Actions gate pass; 66.8 Mbps BULK at 1.01x loaded/unloaded median RTT | Windows route runtime and Android split tunnel remain real-device work |
 | Phase 8+: product | Specifications only or partial scaffolding | Not verified | PairBond/share mode, installer polish, signed releases |
 
 Do not describe Bondify as production-ready or independently audited. It is a substantial
@@ -187,7 +187,7 @@ Branch: `agent/phase7-stabilization`, rebuilt from `main` rather than continuing
 Grok branch. PairBond commit `3e4982d` and Grok's incomplete `core/budget` fragments were not
 transplanted.
 
-### Implemented and locally verified
+### Implemented and verified
 
 - Repaired the Tier 5 foundation rather than layering a pacer over a false signal:
   `Path.InFlight()` had never been incremented anywhere, so the advertised 90% BULK
@@ -201,11 +201,12 @@ transplanted.
   sent counts, and scheduler waits exposed under diagnostics `bulk_pacing`. The channel is
   never closed, eliminating Grok's `Enqueue`-versus-`Close` panic race; cancellation also
   interrupts both the limiter and scheduler retry.
-- Scope the new accounting to classified BULK occupancy. An initial attempt to hard-window
+- Scoped the new accounting to classified BULK occupancy. An initial attempt to hard-window
   all ordinary SPEED traffic exposed that the simplified probe-fed controller and delayed
   ACK path are not a general congestion-control replacement and regressed the established
-  Phase 2/4 gates. Other classes consume BULK's reserved headroom without being charged to
-  it; a send lock keeps capacity checks and FEC generation slots coherent across workers.
+  Phase 2/4 gates. Other classes remain outside that experimental hard window; the BULK
+  counter alone is capped at 90% of CWND. A send lock keeps capacity checks and FEC
+  generation slots coherent across workers.
 - Integrated the BULK pacer symmetrically into client and relay. `-bulk-limit-bps` is an
   optional per-direction bit-rate ceiling and enables classification; zero leaves rate
   unlimited while still queueing for the real 90% headroom cap. `-bulk-queue-packets`
@@ -227,12 +228,16 @@ transplanted.
   limiter refill/cancellation, close/enqueue races, owned packet copies, explicit queue
   overflow, scheduler retry, real loopback UDP pacing/headroom, ACK release, split-rule
   canonicalization, Linux route parsing, and RTT percentile math.
+- [GitHub Actions run #78](https://github.com/chewtoo22-rgb/Bondify/actions/runs/30861000515)
+  passed every phase and platform job on 2026-08-03. The new privileged Phase 7 gate measured
+  66.8 Mbps reverse BULK goodput while loaded port-22 median RTT was 40.73 ms versus 40.33 ms
+  unloaded (1.01x, limit 1.25x). The bounded pacer reported 94 explicit queue-overload drops
+  and zero scheduler waits; the gate also verified the configured 70 Mbps limiter was live.
 
 ### Still not claimed
 
-- This sandbox rejects network namespace/netlink operations with `Operation not permitted`,
-  so the new privileged gate could not execute locally. It is wired into GitHub Actions and
-  must pass there before Phase 7 is called gate-verified.
+- The privileged network-namespace gate is CI-verified, but this restricted sandbox still
+  cannot reproduce it locally because netlink operations return `Operation not permitted`.
 - Windows route creation/removal still has no real-Windows runtime evidence, consistent with
   Phase 6's existing platform caveat. Android still has no split-tunnel route integration.
 - `-bulk-limit-bps` is a bandwidth rate ceiling, not a cumulative/monthly metered-data

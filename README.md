@@ -333,7 +333,7 @@ like this typically only surfaces as a runtime crash, which nothing here can cat
 that is real outstanding work for whoever picks this up with access to an actual Windows
 machine.
 
-## Phase 7 stabilization candidate
+## Phase 7 stabilization
 
 Phase 7 now has an implementation for all three scoped pieces:
 
@@ -356,17 +356,18 @@ Phase 7 now has an implementation for all three scoped pieces:
   unit-tested; Windows uses `Find-NetRoute`/`New-NetRoute` and cross-builds, but still needs
   the real-Windows runtime pass already outstanding for Phase 6.
 
-`testbed/run_phase7.sh` is the missing mixed-traffic gate: both directions of two 50 Mbps /
+`testbed/run_phase7.sh` is the mixed-traffic gate: both directions of two 50 Mbps /
 20 ms paths are shaped, a reverse iperf3 transfer supplies real BULK download traffic, and a
 persistent TCP echo connection on port 22 supplies genuinely SSH-classified INTERACTIVE
 traffic. It requires at least 50 Mbps bulk goodput and loaded median RTT no more than 1.25x
 the unloaded median, and it verifies the relay's active pacing telemetry.
 
 **Verification status:** unit/race tests, build, vet, golangci-lint v2.12.2, Linux host
-build, and Windows cross-build/vet pass locally. This sandbox cannot create network namespaces or query netlink
-(`Operation not permitted`), so it cannot honestly claim the privileged mixed-traffic gate
-passed here. The gate is CI-fatal and must pass on the PR's GitHub runner before Phase 7 is
-called gate-verified.
+build, and Windows cross-build/vet pass locally. The CI-fatal privileged gate passed in
+[GitHub Actions run #78](https://github.com/chewtoo22-rgb/Bondify/actions/runs/30861000515):
+66.8 Mbps reverse BULK goodput with loaded median RTT of 40.73 ms versus 40.33 ms unloaded
+(1.01x, limit 1.25x). This sandbox itself still cannot create network namespaces or query
+netlink (`Operation not permitted`).
 
 **Known limits:** the classifier intentionally does no TLS SNI, QUIC, or per-application
 inspection; the first budget primitive is a bandwidth-rate ceiling, not a monthly byte
