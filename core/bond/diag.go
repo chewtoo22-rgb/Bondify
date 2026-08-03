@@ -1,6 +1,11 @@
 package bond
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+
+	"github.com/chewtoo22-rgb/bondify/core/budget"
+)
 
 // PathDiag is one path's live telemetry, shaped for direct JSON serialization -- this is
 // the same data the CLI's statsLoop prints, plus the counters PROTOCOL.md §6's `stats`
@@ -21,6 +26,7 @@ type PathDiag struct {
 }
 
 func pathDiagOf(p *Path) PathDiag {
+	stats := snapshotStats(&p.Stats)
 	return PathDiag{
 		ID:         p.ID(),
 		Role:       p.Role().String(),
@@ -29,11 +35,24 @@ func pathDiagOf(p *Path) PathDiag {
 		LossPct:    p.Loss() * 100,
 		InFlight:   p.InFlight(),
 		CWND:       p.CWND(),
-		TxPackets:  p.Stats.TxPackets,
-		RxPackets:  p.Stats.RxPackets,
-		TxBytes:    p.Stats.TxBytes,
-		RxBytes:    p.Stats.RxBytes,
+		TxPackets:  stats.TxPackets,
+		RxPackets:  stats.RxPackets,
+		TxBytes:    stats.TxBytes,
+		RxBytes:    stats.RxBytes,
 		LastActive: p.LastActivity().Seconds(),
+	}
+}
+
+func snapshotStats(stats *Stats) Stats {
+	return Stats{
+		TxPackets: atomic.LoadUint64(&stats.TxPackets),
+		RxPackets: atomic.LoadUint64(&stats.RxPackets),
+		TxBytes:   atomic.LoadUint64(&stats.TxBytes),
+		RxBytes:   atomic.LoadUint64(&stats.RxBytes),
+		RxErrors:  atomic.LoadUint64(&stats.RxErrors),
+		TxAcks:    atomic.LoadUint64(&stats.TxAcks),
+		RxAcks:    atomic.LoadUint64(&stats.RxAcks),
+		TxRetries: atomic.LoadUint64(&stats.TxRetries),
 	}
 }
 
@@ -53,6 +72,9 @@ type AggregateDiag struct {
 	ReorderMaxBytes       int     `json:"reorder_max_bytes"`
 	ReorderForcedReleases uint64  `json:"reorder_forced_releases"`
 	UptimeSec             float64 `json:"uptime_sec"`
+	// BulkPacing is absent when traffic classification is disabled. When present it makes
+	// configured rate/headroom pacing and its bounded-queue overload visible.
+	BulkPacing *budget.PacerSnapshot `json:"bulk_pacing,omitempty"`
 }
 
 // SessionDiag is one bonded session's full diagnostics snapshot: scheduler in use, every
@@ -75,24 +97,31 @@ func (t *ClientTunnel) Diagnostics() SessionDiag {
 	for i, p := range paths {
 		pd[i] = pathDiagOf(p)
 	}
+	var bulkPacing *budget.PacerSnapshot
+	if p := t.bulkPacer.Load(); p != nil {
+		snapshot := p.Snapshot()
+		bulkPacing = &snapshot
+	}
+	stats := snapshotStats(&t.Stats)
 	return SessionDiag{
 		SessionIndex: sessionIndexHex(t.sessionIndex),
 		TunnelIP:     t.tunnelIP,
 		Scheduler:    t.sched.Name(),
 		Paths:        pd,
 		Aggregate: AggregateDiag{
-			TxPackets:             t.Stats.TxPackets,
-			RxPackets:             t.Stats.RxPackets,
-			TxBytes:               t.Stats.TxBytes,
-			RxBytes:               t.Stats.RxBytes,
-			RxErrors:              t.Stats.RxErrors,
-			TxAcks:                t.Stats.TxAcks,
-			RxAcks:                t.Stats.RxAcks,
-			TxRetries:             t.Stats.TxRetries,
+			TxPackets:             stats.TxPackets,
+			RxPackets:             stats.RxPackets,
+			TxBytes:               stats.TxBytes,
+			RxBytes:               stats.RxBytes,
+			RxErrors:              stats.RxErrors,
+			TxAcks:                stats.TxAcks,
+			RxAcks:                stats.RxAcks,
+			TxRetries:             stats.TxRetries,
 			ReorderOccupancyBytes: t.reorderBuf.Occupancy(),
 			ReorderMaxBytes:       t.reorderBuf.MaxBytes(),
 			ReorderForcedReleases: t.reorderBuf.ForcedReleases(),
 			UptimeSec:             time.Since(t.startedAt).Seconds(),
+			BulkPacing:            bulkPacing,
 		},
 	}
 }
@@ -116,6 +145,12 @@ func (r *Relay) Diagnostics() RelayDiag {
 
 	out := make([]SessionDiag, len(sessions))
 	for i, s := range sessions {
+		var bulkPacing *budget.PacerSnapshot
+		if s.bulkPacer != nil {
+			snapshot := s.bulkPacer.Snapshot()
+			bulkPacing = &snapshot
+		}
+		stats := snapshotStats(&s.Stats)
 		s.pathsMu.RLock()
 		pd := make([]PathDiag, 0, len(s.paths))
 		for _, p := range s.paths {
@@ -128,18 +163,19 @@ func (r *Relay) Diagnostics() RelayDiag {
 			Scheduler:    s.sched.Name(),
 			Paths:        pd,
 			Aggregate: AggregateDiag{
-				TxPackets:             s.Stats.TxPackets,
-				RxPackets:             s.Stats.RxPackets,
-				TxBytes:               s.Stats.TxBytes,
-				RxBytes:               s.Stats.RxBytes,
-				RxErrors:              s.Stats.RxErrors,
-				TxAcks:                s.Stats.TxAcks,
-				RxAcks:                s.Stats.RxAcks,
-				TxRetries:             s.Stats.TxRetries,
+				TxPackets:             stats.TxPackets,
+				RxPackets:             stats.RxPackets,
+				TxBytes:               stats.TxBytes,
+				RxBytes:               stats.RxBytes,
+				RxErrors:              stats.RxErrors,
+				TxAcks:                stats.TxAcks,
+				RxAcks:                stats.RxAcks,
+				TxRetries:             stats.TxRetries,
 				ReorderOccupancyBytes: s.reorderBuf.Occupancy(),
 				ReorderMaxBytes:       s.reorderBuf.MaxBytes(),
 				ReorderForcedReleases: s.reorderBuf.ForcedReleases(),
 				UptimeSec:             time.Since(s.startedAt).Seconds(),
+				BulkPacing:            bulkPacing,
 			},
 		}
 	}

@@ -237,6 +237,7 @@ type pendingPacket struct {
 	Flags             uint8
 	OriginalPathID    uint8
 	OriginalPathKnown bool
+	InFlightAccounted bool
 	SentAt            time.Time
 	LastSent          time.Time
 	Retries           int
@@ -255,10 +256,15 @@ type retransmitQueue struct {
 	packets map[uint64]*pendingPacket
 	order   []uint64
 	bytes   int
+	release func(pathID uint8, bytes int)
 }
 
-func newRetransmitQueue() *retransmitQueue {
-	return &retransmitQueue{packets: make(map[uint64]*pendingPacket)}
+func newRetransmitQueue(release ...func(pathID uint8, bytes int)) *retransmitQueue {
+	q := &retransmitQueue{packets: make(map[uint64]*pendingPacket)}
+	if len(release) > 0 {
+		q.release = release[0]
+	}
+	return q
 }
 
 func (q *retransmitQueue) Track(
@@ -267,6 +273,7 @@ func (q *retransmitQueue) Track(
 	flags uint8,
 	pathID uint8,
 	pathKnown bool,
+	accountInFlight bool,
 	now time.Time,
 ) {
 	cp := append([]byte(nil), payload...)
@@ -282,12 +289,22 @@ func (q *retransmitQueue) Track(
 		Flags:             flags & retransmitSemanticFlags,
 		OriginalPathID:    pathID,
 		OriginalPathKnown: pathKnown,
+		InFlightAccounted: accountInFlight,
 		SentAt:            now,
 		LastSent:          now,
 	}
 	q.order = append(q.order, gsn)
 	q.bytes += len(cp)
 	q.enforceBoundsLocked()
+}
+
+// Forget removes a packet that was tracked before an attempted socket write but never
+// reached the wire. Tracking first closes the otherwise-real race where a loopback/very
+// fast peer can ACK before the sender records the packet.
+func (q *retransmitQueue) Forget(gsn uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.deleteLocked(gsn)
 }
 
 func (q *retransmitQueue) enforceBoundsLocked() {
@@ -444,6 +461,7 @@ func (q *retransmitQueue) Due(now time.Time, rto time.Duration) []pendingPacket 
 			Flags:             pkt.Flags,
 			OriginalPathID:    pkt.OriginalPathID,
 			OriginalPathKnown: pkt.OriginalPathKnown,
+			InFlightAccounted: pkt.InFlightAccounted,
 			SentAt:            pkt.SentAt,
 			LastSent:          pkt.LastSent,
 			Retries:           pkt.Retries,
@@ -463,6 +481,9 @@ func (q *retransmitQueue) deleteLocked(gsn uint64) {
 	}
 	q.bytes -= len(pkt.Payload)
 	delete(q.packets, gsn)
+	if pkt.InFlightAccounted && pkt.OriginalPathKnown && q.release != nil {
+		q.release(pkt.OriginalPathID, len(pkt.Payload))
+	}
 }
 
 func (q *retransmitQueue) compactOrderLocked() {

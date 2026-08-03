@@ -1,6 +1,8 @@
 package bond
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,4 +79,28 @@ func TestSessionIndexHex(t *testing.T) {
 			t.Errorf("sessionIndexHex(%#x) = %q, want %q", in, got, want)
 		}
 	}
+}
+
+func TestDiagnosticsCanRaceAtomicCounterUpdates(t *testing.T) {
+	p := NewPath(0, nil)
+	p.SetActive()
+	tunnel := &ClientTunnel{
+		startedAt:  time.Now(),
+		sched:      sched.NewRoundRobin(),
+		reorderBuf: reorder.New(reorder.DefaultDeadlineMin, 0),
+		paths:      []*Path{p},
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			atomic.AddUint64(&tunnel.Stats.TxPackets, 1)
+			atomic.AddUint64(&p.Stats.TxPackets, 1)
+		}
+	}()
+	for i := 0; i < 1000; i++ {
+		_ = tunnel.Diagnostics()
+	}
+	wg.Wait()
 }

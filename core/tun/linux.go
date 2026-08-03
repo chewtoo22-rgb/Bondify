@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -41,7 +42,76 @@ func Configure(ifName string, localCIDR string, routes []string) error {
 // the relay would be routed back into the tunnel it's trying to carry, livelocking with
 // zero throughput. See PROTOCOL.md / ARCHITECTURE.md §3.1 "the routing loop".
 func AddHostRoute(dstIP net.IP, viaDev string) error {
-	return run("ip", "route", "add", dstIP.String()+"/32", "dev", viaDev)
+	family, suffix := "-4", "/32"
+	if dstIP.To4() == nil {
+		family, suffix = "-6", "/128"
+	}
+	return run("ip", family, "route", "add", dstIP.String()+suffix, "dev", viaDev)
+}
+
+// RouteFor snapshots the physical route to dst before the tunnel default is installed.
+func RouteFor(dst net.IP) (PhysicalRoute, error) {
+	if dst.To4() == nil {
+		return PhysicalRoute{}, fmt.Errorf("tun: split-tunnel route lookup requires IPv4, got %s", dst)
+	}
+	out, err := exec.Command("ip", "-4", "route", "get", dst.String()).CombinedOutput()
+	if err != nil {
+		return PhysicalRoute{}, fmt.Errorf("tun: ip route get %s: %w: %s", dst, err, out)
+	}
+	route, err := parseRouteGet(string(out))
+	if err != nil {
+		return PhysicalRoute{}, err
+	}
+	return route, nil
+}
+
+func parseRouteGet(out string) (PhysicalRoute, error) {
+	var route PhysicalRoute
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		for i, field := range fields {
+			switch {
+			case field == "dev" && i+1 < len(fields):
+				route.Device = fields[i+1]
+			case field == "via" && i+1 < len(fields):
+				route.Gateway = net.ParseIP(fields[i+1])
+			}
+		}
+		if route.Device != "" {
+			return route, nil
+		}
+	}
+	return PhysicalRoute{}, fmt.Errorf("tun: could not parse physical route from: %s", out)
+}
+
+// AddBypassRoute installs cidr through a previously-snapshotted physical route. It returns
+// added=false when an exact route already exists, so callers only remove routes they own.
+func AddBypassRoute(cidr string, route PhysicalRoute) (added bool, err error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() {
+		return false, fmt.Errorf("tun: invalid IPv4 bypass CIDR %q", cidr)
+	}
+	cidr = prefix.Masked().String()
+	if route.Device == "" {
+		return false, fmt.Errorf("tun: bypass route %s has no physical device", cidr)
+	}
+	existing, err := exec.Command("ip", "-4", "route", "show", "to", "exact", cidr).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("tun: inspect route %s: %w: %s", cidr, err, existing)
+	}
+	if strings.TrimSpace(string(existing)) != "" {
+		return false, nil
+	}
+	args := []string{"-4", "route", "add", cidr}
+	if gateway := route.Gateway.To4(); gateway != nil {
+		args = append(args, "via", gateway.String())
+	}
+	args = append(args, "dev", route.Device)
+	if err := run("ip", args...); err != nil {
+		return false, fmt.Errorf("tun: add bypass route %s: %w", cidr, err)
+	}
+	return true, nil
 }
 
 // DelRoute removes a previously-added route/CIDR.
@@ -60,16 +130,11 @@ func EgressDevice(dst net.IP) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("tun: ip route get %s: %w: %s", dst, err, out)
 	}
-	sc := bufio.NewScanner(strings.NewReader(string(out)))
-	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		for i, f := range fields {
-			if f == "dev" && i+1 < len(fields) {
-				return fields[i+1], nil
-			}
-		}
+	route, err := parseRouteGet(string(out))
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("tun: could not parse egress device from: %s", out)
+	return route.Device, nil
 }
 
 // DialUDPViaDevice dials a UDP socket bound to laddr (may be nil) and, if device is

@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/chewtoo22-rgb/bondify/core/bond"
+	"github.com/chewtoo22-rgb/bondify/core/budget"
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
 	"github.com/chewtoo22-rgb/bondify/core/diag"
 	"github.com/chewtoo22-rgb/bondify/core/proto"
@@ -38,6 +39,8 @@ func main() {
 		mode      = flag.String("mode", "speed", "sending mode for the relay's own return traffic: speed or redundant")
 		fec       = flag.Bool("fec", false, "adaptive Reed-Solomon FEC on the relay's own return traffic; opt-in since it copies every packet into a generation buffer even at zero loss")
 		classify  = flag.Bool("classify", false, "Tier 5 traffic-class routing on the relay's own return traffic (see the client's -classify flag for the per-class routing); ignored in -mode redundant")
+		bulkLimit = flag.Int64("bulk-limit-bps", 0, "optional return-traffic BULK pacing ceiling in bits per second; enables -classify, 0 is unlimited")
+		bulkQueue = flag.Int("bulk-queue-packets", bond.DefaultBulkQueuePackets, "maximum copied BULK packets waiting for pacing/headroom; queue-full drops are reported in diagnostics")
 	)
 	flag.Parse()
 
@@ -98,22 +101,41 @@ func main() {
 		log.Printf("relay: warning: -classify has no effect in -mode redundant; disabling it")
 		*classify = false
 	}
+	bulkBudget, err := budget.FromBitsPerSecond(*bulkLimit)
+	if err != nil {
+		log.Fatalf("relay: bad -bulk-limit-bps: %v", err)
+	}
+	if *bulkQueue < 1 {
+		log.Fatalf("relay: -bulk-queue-packets must be >= 1")
+	}
+	if *bulkLimit > 0 {
+		if sendMode == bond.ModeRedundant {
+			log.Fatalf("relay: -bulk-limit-bps requires -mode speed")
+		}
+		if !*classify {
+			log.Printf("relay: enabling -classify because -bulk-limit-bps is set")
+			*classify = true
+		}
+	}
 
 	r, err := bond.NewRelay(bond.RelayConfig{
-		ListenAddr: *listen,
-		RelayKey:   key,
-		PoolCIDR:   *poolCIDR,
-		DNS:        dns,
-		MTU:        *mtu,
-		KeepAlive:  *keepalive,
-		Scheduler:  *scheduler,
-		Mode:       sendMode,
-		FEC:        *fec,
-		Classify:   *classify,
+		ListenAddr:       *listen,
+		RelayKey:         key,
+		PoolCIDR:         *poolCIDR,
+		DNS:              dns,
+		MTU:              *mtu,
+		KeepAlive:        *keepalive,
+		Scheduler:        *scheduler,
+		Mode:             sendMode,
+		FEC:              *fec,
+		Classify:         *classify,
+		BulkBudget:       bulkBudget,
+		BulkQueuePackets: *bulkQueue,
 	}, dev)
 	if err != nil {
 		log.Fatalf("relay: init: %v", err)
 	}
+	defer r.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

@@ -30,8 +30,9 @@ Bonding is real, but it is not magic. These are physics, not marketing copy:
   10x slower or higher-latency than the rest hurts more than it helps. Bondify will tell you
   when it detects this; believe it.
 - **Bondify looks like a VPN to the internet, because it is one.** Streaming services and
-  banks may geoblock it. Split tunnelling with a curated default bypass list is provided
-  and enabled by default for known-problematic destinations.
+  banks may geoblock it. Desktop full-tunnel mode enables a curated LAN/private/link-local/
+  CGNAT bypass list by default and accepts explicit destination CIDRs; it cannot promise a
+  stable built-in list for third-party services whose addresses change without notice.
 - **REDUNDANT mode multiplies your data usage by the duplication factor.** On metered
   links this is expensive by design — you're trading bandwidth for near-zero effective
   loss and instant failover.
@@ -81,6 +82,14 @@ sudo ./build/bondify-relay -listen :51820 -pool 10.77.0.0/24 -tun bondify0 \
 sudo ./build/bondify -relay <relay-host>:51820 -relay-pubkey <printed-key> \
      -tun bondify0 -default-route
 ```
+
+With `-default-route`, desktop split tunneling is on by default for local/private ranges.
+Add destinations with `-bypass-routes cidr,cidr` or disable the curated set with
+`-split-tunnel=false`. Tier 5 is opt-in with `-classify`; an optional
+`-bulk-limit-bps <bits/sec>` on either binary enables it automatically and paces that
+direction's BULK traffic. Use the flag on both client and relay when both upload and download
+need a ceiling. Queue depth, scheduler waits, and the bounded queue's overload drops appear
+under `aggregate.bulk_pacing` in live diagnostics.
 
 ## Live diagnostics
 
@@ -324,47 +333,46 @@ like this typically only surfaces as a runtime crash, which nothing here can cat
 that is real outstanding work for whoever picks this up with access to an actual Windows
 machine.
 
-## Verified so far (Phase 7, partial)
+## Phase 7 stabilization
 
-Phase 7 is traffic classification, budgets, and split tunnel (ARCHITECTURE.md §5). Only the
-first piece has landed so far: Tier 5 traffic-class routing (§2.1.5) — `core/classify`
-classifies each outgoing IP packet by DSCP marking, falling back to a small well-known-port
-list (SSH → INTERACTIVE, DNS → LATENCY, everything else → BULK, the safe default), and
-`core/bond` routes each class differently: LATENCY pins to the single lowest-RTT path and
-never splits, REALTIME duplicates onto the best paths exactly like `-mode redundant` but only
-for packets that need it, BULK gets a hard 90% congestion-window headroom cap so it can never
-starve the other two classes sharing a path, and INTERACTIVE (plus anything unclassifiable)
-uses the configured `-scheduler` tier unchanged. Opt-in via `-classify` on both binaries
-(default off, matching `-fec`) — existing throughput gates for phases 1–4 are completely
-unaffected since they don't pass it.
+Phase 7 now has an implementation for all three scoped pieces:
 
-**Read this section as narrowly as it's written**, same caveat as phases 5 and 6:
-ARCHITECTURE.md §5's actual Phase 7 gate — "loaded bulk download, SSH RTT stays within 25% of
-unloaded" — needs a real concurrent-traffic benchmark harness (a saturating bulk transfer plus
-real SSH-shaped traffic, RTT measured under that load) that does not exist yet. **That gate is
-not claimed as passed.** What's verified is real, but narrower:
+- `core/classify` retains the deliberately conservative DSCP/port classifier and symmetric
+  LATENCY/REALTIME/INTERACTIVE/BULK routing on client and relay.
+- BULK's 90% congestion-window reserve now uses real outstanding-byte accounting. BULK packets
+  are recorded before the socket write (closing a fast-ACK race), released on authenticated
+  ACK or bounded retransmission eviction, and queued while no path has headroom instead of
+  being silently discarded. `core/budget` adds an optional cancellable byte-rate token
+  bucket. Rate limiting waits; only the bounded copied-packet queue can drop, and every such
+  drop is counted in diagnostics.
+- Accounting is deliberately charged only to classified BULK. Applying the simplified
+  controller as a hard window to every packet regresses the established unclassified
+  throughput/loss gates; other classes consume the reserved headroom without being forced
+  through the experimental BULK limiter. Concurrent class workers still serialize FEC slot
+  assignment and the final BULK capacity check.
+- Desktop `-default-route` mode installs more-specific physical routes for the curated
+  IPv4 LAN/private/link-local/CGNAT set and `-bypass-routes`. Existing exact routes are left
+  alone and only routes Bondify added are removed at normal shutdown. Linux route parsing is
+  unit-tested; Windows uses `Find-NetRoute`/`New-NetRoute` and cross-builds, but still needs
+  the real-Windows runtime pass already outstanding for Phase 6.
 
-- `core/classify`'s `Classify` function is unit-tested against real, hand-built IPv4/IPv6
-  packets (not mocked) covering every recognized DSCP value in both directions, port
-  heuristics from both the client and server side of a connection, IPv4 and IPv6, and a
-  battery of malformed/truncated/unrecognized-protocol inputs that must never panic.
-- `core/bond`'s per-class routing (`sendPinned`, `sendClassified`, `sendSpeedCapped`,
-  `capByHeadroom`) is tested against real loopback UDP sockets standing in for paths — not
-  mocked — verifying LATENCY genuinely reaches only the lowest-RTT path, REALTIME genuinely
-  duplicates onto every eligible path, and INTERACTIVE/BULK genuinely still flow through the
-  configured scheduler tier.
-- Both the client and relay apply this symmetrically (the relay's own return traffic is
-  classified and routed the same way), since the Phase 7 gate's SSH-RTT test depends on both
-  directions staying responsive.
-- `go build/vet/test -race` and `golangci-lint run` all pass unchanged across every CI
-  platform target, confirming this didn't regress anything already gate-verified in phases
-  1–6.
+`testbed/run_phase7.sh` is the mixed-traffic gate: both directions of two 50 Mbps /
+20 ms paths are shaped, a reverse iperf3 transfer supplies real BULK download traffic, and a
+persistent TCP echo connection on port 22 supplies genuinely SSH-classified INTERACTIVE
+traffic. It requires at least 50 Mbps bulk goodput and loaded median RTT no more than 1.25x
+the unloaded median, and it verifies the relay's active pacing telemetry.
 
-**Known gaps, honestly stated:** no real mixed-traffic benchmark has run (the actual Phase 7
-gate), the port-based classification heuristic is intentionally small and will misclassify
-plenty of real traffic (no TLS SNI inspection, no QUIC-over-UDP-443 special case, no
-per-application awareness — see `core/classify`'s package doc for the reasoning), and budgets
-plus split tunnel (the rest of Phase 7's scope) haven't been started.
+**Verification status:** unit/race tests, build, vet, golangci-lint v2.12.2, Linux host
+build, and Windows cross-build/vet pass locally. The CI-fatal privileged gate passed in
+[GitHub Actions run #78](https://github.com/chewtoo22-rgb/Bondify/actions/runs/30861000515):
+66.8 Mbps reverse BULK goodput with loaded median RTT of 40.73 ms versus 40.33 ms unloaded
+(1.01x, limit 1.25x). This sandbox itself still cannot create network namespaces or query
+netlink (`Operation not permitted`).
+
+**Known limits:** the classifier intentionally does no TLS SNI, QUIC, or per-application
+inspection; the first budget primitive is a bandwidth-rate ceiling, not a monthly byte
+quota; route-based split tunneling is currently desktop/IPv4; and neither the Windows route
+operations nor Android split-tunnel behavior has been exercised on a real target OS.
 
 ## Scheduler tiers
 
@@ -381,7 +389,7 @@ Phases 0–4 are done and verified. Phase 5 (Android) and Phase 6 (Windows deskt
 real, building/cross-compiling code, but their actual gates (bonded throughput/screen-off
 survival on Android; install-to-bonded time/UAC-prompt count on Windows) need a real device
 or a real Windows session respectively and have not been verified — see "Verified so far
-(Phase 5)" and "Verified so far (Phase 6)" above. Phase 7 (traffic classification, budgets,
-split tunnel) has started: Tier 5 traffic-class routing is implemented and unit-tested (see
-"Verified so far (Phase 7, partial)" above), but its own gate — a real mixed-traffic
-benchmark — hasn't run, and budgets/split tunnel haven't been started.
+(Phase 5)" and "Verified so far (Phase 6)" above. Phase 7 has a stabilization candidate for
+classification, rate pacing, desktop IPv4 split routes, and its real mixed-traffic harness
+(see "Phase 7 stabilization candidate" above). Local unprivileged verification passes; the
+new privileged gate must pass in PR CI before the phase is called gate-verified.
