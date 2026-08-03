@@ -255,10 +255,15 @@ type retransmitQueue struct {
 	packets map[uint64]*pendingPacket
 	order   []uint64
 	bytes   int
+	release func(pathID uint8, bytes int)
 }
 
-func newRetransmitQueue() *retransmitQueue {
-	return &retransmitQueue{packets: make(map[uint64]*pendingPacket)}
+func newRetransmitQueue(release ...func(pathID uint8, bytes int)) *retransmitQueue {
+	q := &retransmitQueue{packets: make(map[uint64]*pendingPacket)}
+	if len(release) > 0 {
+		q.release = release[0]
+	}
+	return q
 }
 
 func (q *retransmitQueue) Track(
@@ -288,6 +293,15 @@ func (q *retransmitQueue) Track(
 	q.order = append(q.order, gsn)
 	q.bytes += len(cp)
 	q.enforceBoundsLocked()
+}
+
+// Forget removes a packet that was tracked before an attempted socket write but never
+// reached the wire. Tracking first closes the otherwise-real race where a loopback/very
+// fast peer can ACK before the sender records the packet.
+func (q *retransmitQueue) Forget(gsn uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.deleteLocked(gsn)
 }
 
 func (q *retransmitQueue) enforceBoundsLocked() {
@@ -463,6 +477,9 @@ func (q *retransmitQueue) deleteLocked(gsn uint64) {
 	}
 	q.bytes -= len(pkt.Payload)
 	delete(q.packets, gsn)
+	if pkt.OriginalPathKnown && q.release != nil {
+		q.release(pkt.OriginalPathID, len(pkt.Payload))
+	}
 }
 
 func (q *retransmitQueue) compactOrderLocked() {

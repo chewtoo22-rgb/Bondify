@@ -22,7 +22,7 @@
 #   root ns  <--v-rel-out-h/v-rel-out-->  bondify-relay ns  <--v-rel-wan0/v-cli-wan0-->  bondify-client ns
 #                                        [10.99.0.1 dummy]  <--v-rel-wan1/v-cli-wan1-->
 #
-# Usage: bash two_path.sh {up|down|shape0 <netem args>|shape1 <netem args>|unshape}
+# Usage: bash two_path.sh {up|down|shape0|shape1|shape0-relay|shape1-relay <netem args>|unshape}
 set -euo pipefail
 
 EGRESS_DEV="${BONDIFY_TEST_EGRESS_DEV:-$(ip route show default | awk '/default/ {print $5; exit}')}"
@@ -86,9 +86,9 @@ down() {
 }
 
 shape() {
-	local dev="$1"
-	shift
-	if ! ip netns exec bondify-client tc qdisc add dev "$dev" root netem "$@" 2>/tmp/netem-check.err; then
+	local namespace="$1" dev="$2"
+	shift 2
+	if ! ip netns exec "$namespace" tc qdisc add dev "$dev" root netem "$@" 2>/tmp/netem-check.err; then
 		echo "testbed: WARNING: tc netem unavailable in this kernel ($(cat /tmp/netem-check.err)); running unshaped" >&2
 		return 1
 	fi
@@ -98,13 +98,17 @@ shape() {
 unshape() {
 	ip netns exec bondify-client tc qdisc del dev v-cli-wan0 root 2>/dev/null || true
 	ip netns exec bondify-client tc qdisc del dev v-cli-wan1 root 2>/dev/null || true
+	ip netns exec bondify-relay tc qdisc del dev v-rel-wan0 root 2>/dev/null || true
+	ip netns exec bondify-relay tc qdisc del dev v-rel-wan1 root 2>/dev/null || true
 }
 
 case "${1:-}" in
 up) up ;;
 down) down ;;
-shape0) shift; shape v-cli-wan0 "$@" ;;
-shape1) shift; shape v-cli-wan1 "$@" ;;
+shape0) shift; shape bondify-client v-cli-wan0 "$@" ;;
+shape1) shift; shape bondify-client v-cli-wan1 "$@" ;;
+shape0-relay) shift; shape bondify-relay v-rel-wan0 "$@" ;;
+shape1-relay) shift; shape bondify-relay v-rel-wan1 "$@" ;;
 unshape) unshape ;;
-*) echo "usage: $0 {up|down|shape0 <netem args>|shape1 <netem args>|unshape}" >&2; exit 2 ;;
+*) echo "usage: $0 {up|down|shape0|shape1|shape0-relay|shape1-relay <netem args>|unshape}" >&2; exit 2 ;;
 esac

@@ -30,7 +30,7 @@ func mustRelay(t *testing.T) (*Relay, crypto.Keypair) {
 		t.Fatalf("new relay: %v", err)
 	}
 	go func() { _ = r.ServeUDP() }()
-	t.Cleanup(func() { _ = r.conn.Close() })
+	t.Cleanup(r.Close)
 	return r, relayKP
 }
 

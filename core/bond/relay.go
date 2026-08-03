@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chewtoo22-rgb/bondify/core/budget"
 	"github.com/chewtoo22-rgb/bondify/core/classify"
 	"github.com/chewtoo22-rgb/bondify/core/crypto"
 	"github.com/chewtoo22-rgb/bondify/core/proto"
@@ -40,6 +41,10 @@ type RelayConfig struct {
 	// ARCHITECTURE.md §2.1.5's own gate (SSH RTT staying low under a concurrent bulk
 	// download): SSH's low-latency traffic flows in both directions.
 	Classify bool
+	// BulkBudget and BulkQueuePackets mirror ClientConfig for relay-to-client BULK
+	// traffic. The return direction is the loaded direction for Phase 7's download gate.
+	BulkBudget       budget.Config
+	BulkQueuePackets int
 }
 
 type relaySession struct {
@@ -60,17 +65,18 @@ type relaySession struct {
 	rtx        *retransmitQueue
 	ackSendMu  sync.Mutex
 
-	mode     Mode
-	classify bool          // Tier 5 traffic-class routing; see RelayConfig.Classify
-	fecSend  *fecSender    // nil when FEC is disabled
-	fecRecv  *fecGenBuffer // nil when FEC is disabled
+	mode      Mode
+	classify  bool          // Tier 5 traffic-class routing; see RelayConfig.Classify
+	fecSend   *fecSender    // nil when FEC is disabled
+	fecRecv   *fecGenBuffer // nil when FEC is disabled
+	bulkPacer *budget.Pacer
 
 	sendGSN atomic.Uint64
 
 	Stats Stats
 }
 
-func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnelIP net.IP, cfg RelayConfig) *relaySession {
+func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnelIP net.IP, cfg RelayConfig) (*relaySession, error) {
 	scheduler, err := sched.New(cfg.Scheduler)
 	if err != nil {
 		// Already validated once in NewRelay; an unknown name here would be a caller bug,
@@ -87,10 +93,14 @@ func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnel
 		sched:        scheduler,
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
 		ack:          newACKState(),
-		rtx:          newRetransmitQueue(),
 		mode:         cfg.Mode,
 		classify:     cfg.Classify,
 	}
+	rs.rtx = newRetransmitQueue(func(pathID uint8, bytes int) {
+		if p := rs.pathByID(pathID); p != nil {
+			p.releaseInFlight(bytes)
+		}
+	})
 	if cfg.FEC {
 		rs.fecSend = newFECSender(rs.fecLossEstimate, func(genID uint16, genIndex, n, m, w int, shard []byte) {
 			r.sendFECParity(rs, genID, genIndex, n, m, w, shard)
@@ -98,7 +108,16 @@ func newRelaySession(r *Relay, sessionIndex uint32, sess *crypto.Session, tunnel
 		rs.fecRecv = newFECGenBuffer()
 	}
 	rs.schedPathView.Store([]sched.Path(nil))
-	return rs
+	if cfg.Classify && cfg.Mode != ModeRedundant {
+		p, err := newBulkPacer(r.pacingCtx, cfg.BulkBudget, cfg.BulkQueuePackets, func(pkt []byte) bool {
+			return r.trySendSpeedCapped(rs, pkt, bulkHeadroomFraction)
+		})
+		if err != nil {
+			return nil, err
+		}
+		rs.bulkPacer = p
+	}
+	return rs, nil
 }
 
 // pathSlice returns a snapshot of this session's current path set as concrete *Path
@@ -193,10 +212,13 @@ type Relay struct {
 	dev  tun.Device
 	pool *IPPool
 
-	mu          sync.RWMutex
-	byIndex     map[uint32]*relaySession
-	byTunnelIP  map[string]*relaySession
-	byClientKey map[[crypto.KeyLen]byte]*relaySession
+	mu           sync.RWMutex
+	byIndex      map[uint32]*relaySession
+	byTunnelIP   map[string]*relaySession
+	byClientKey  map[[crypto.KeyLen]byte]*relaySession
+	pacingCtx    context.Context
+	pacingCancel context.CancelFunc
+	closeOnce    sync.Once
 
 	Stats Stats
 }
@@ -204,6 +226,15 @@ type Relay struct {
 func NewRelay(cfg RelayConfig, dev tun.Device) (*Relay, error) {
 	if _, err := sched.New(cfg.Scheduler); err != nil {
 		return nil, fmt.Errorf("bond: %w", err)
+	}
+	if err := cfg.BulkBudget.Validate(); err != nil {
+		return nil, fmt.Errorf("bond: bulk budget: %w", err)
+	}
+	if cfg.BulkQueuePackets < 0 {
+		return nil, fmt.Errorf("bond: bulk queue packets must be >= 0")
+	}
+	if cfg.BulkBudget.BytesPerSecond > 0 && (!cfg.Classify || cfg.Mode == ModeRedundant) {
+		return nil, fmt.Errorf("bond: bulk budget requires classification in speed mode")
 	}
 	pool, err := NewIPPool(cfg.PoolCIDR)
 	if err != nil {
@@ -217,14 +248,17 @@ func NewRelay(cfg RelayConfig, dev tun.Device) (*Relay, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bond: listen udp: %w", err)
 	}
+	pacingCtx, pacingCancel := context.WithCancel(context.Background())
 	r := &Relay{
-		cfg:         cfg,
-		conn:        conn,
-		dev:         dev,
-		pool:        pool,
-		byIndex:     make(map[uint32]*relaySession),
-		byTunnelIP:  make(map[string]*relaySession),
-		byClientKey: make(map[[crypto.KeyLen]byte]*relaySession),
+		cfg:          cfg,
+		conn:         conn,
+		dev:          dev,
+		pool:         pool,
+		byIndex:      make(map[uint32]*relaySession),
+		byTunnelIP:   make(map[string]*relaySession),
+		byClientKey:  make(map[[crypto.KeyLen]byte]*relaySession),
+		pacingCtx:    pacingCtx,
+		pacingCancel: pacingCancel,
 	}
 	go r.livenessLoop()
 	return r, nil
@@ -242,7 +276,12 @@ func (r *Relay) GatewayIP() net.IP { return r.pool.Gateway() }
 func (r *Relay) livenessLoop() {
 	ticker := time.NewTicker(ProbeInterval)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-r.pacingCtx.Done():
+			return
+		case <-ticker.C:
+		}
 		now := time.Now()
 		r.mu.RLock()
 		sessions := make([]*relaySession, 0, len(r.byIndex))
@@ -262,6 +301,34 @@ func (r *Relay) livenessLoop() {
 			}
 		}
 	}
+}
+
+// Close stops background pacing/liveness work and closes the relay's sockets and TUN.
+// It is safe to call more than once.
+func (r *Relay) Close() {
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		r.pacingCancel()
+		r.mu.RLock()
+		sessions := make([]*relaySession, 0, len(r.byIndex))
+		for _, s := range r.byIndex {
+			sessions = append(sessions, s)
+		}
+		r.mu.RUnlock()
+		for _, s := range sessions {
+			if s.bulkPacer != nil {
+				s.bulkPacer.Close()
+			}
+		}
+		if r.conn != nil {
+			_ = r.conn.Close()
+		}
+		if r.dev != nil {
+			_ = r.dev.Close()
+		}
+	})
 }
 
 // updateRelayPathLiveness applies one deterministic relay-side liveness tick.
@@ -365,11 +432,16 @@ func (r *Relay) sendPinned(sess *relaySession, pkt []byte) {
 // sendSpeedCapped is Tier 5's BULK handling on the relay's return traffic; see
 // ClientTunnel.sendSpeedCapped.
 func (r *Relay) sendSpeedCapped(sess *relaySession, pkt []byte, headroom float64) {
-	path := sess.sched.Next(capByHeadroom(sess.schedPaths(), headroom), len(pkt))
+	_ = r.trySendSpeedCapped(sess, pkt, headroom)
+}
+
+func (r *Relay) trySendSpeedCapped(sess *relaySession, pkt []byte, headroom float64) bool {
+	path := sess.sched.Next(capByHeadroom(sess.schedPaths(), headroom, len(pkt)), len(pkt))
 	if path == nil {
-		return
+		return false
 	}
 	r.sendOnPath(sess, path.(*Path), pkt)
+	return true
 }
 
 // sendClassified is Tier 5's dispatcher for the relay's return traffic; see
@@ -384,6 +456,10 @@ func (r *Relay) sendClassified(sess *relaySession, pkt []byte) {
 	case classify.Interactive:
 		r.sendSpeed(sess, pkt)
 	default: // classify.Bulk, classify.Unknown
+		if sess.bulkPacer != nil {
+			_ = sess.bulkPacer.Enqueue(pkt)
+			return
+		}
 		r.sendSpeedCapped(sess, pkt, bulkHeadroomFraction)
 	}
 }
@@ -419,15 +495,19 @@ func (r *Relay) sendOnPath(sess *relaySession, p *Path, pkt []byte) {
 		log.Printf("bond: relay seal error: %v", err)
 		return
 	}
+	p.addInFlight(len(pkt))
+	sess.rtx.Track(gsn, pkt, header.Flags, p.id, true, time.Now())
 	if _, err := r.conn.WriteToUDP(out, addr); err != nil {
+		sess.rtx.Forget(gsn)
 		log.Printf("bond: relay udp write error: %v", err)
 		return
 	}
 	atomic.AddUint64(&r.Stats.TxPackets, 1)
 	atomic.AddUint64(&r.Stats.TxBytes, uint64(len(pkt)))
+	atomic.AddUint64(&sess.Stats.TxPackets, 1)
+	atomic.AddUint64(&sess.Stats.TxBytes, uint64(len(pkt)))
 	atomic.AddUint64(&p.Stats.TxPackets, 1)
 	atomic.AddUint64(&p.Stats.TxBytes, uint64(len(pkt)))
-	sess.rtx.Track(gsn, pkt, header.Flags, p.id, true, time.Now())
 
 	// See ClientTunnel.sendSpeed's comment: Record (and, on the Kth packet, close and emit
 	// parity for) this generation only after the packet itself is actually on the wire.
@@ -444,6 +524,7 @@ func (r *Relay) sendRedundant(sess *relaySession, pkt []byte) {
 		return
 	}
 	gsn := sess.sendGSN.Add(1) - 1
+	sess.rtx.Track(gsn, pkt, 0, 0, false, time.Now())
 	sent := false
 	for i, p := range paths {
 		addr := p.RemoteAddr()
@@ -469,11 +550,13 @@ func (r *Relay) sendRedundant(sess *relaySession, pkt []byte) {
 		sent = true
 	}
 	if !sent {
+		sess.rtx.Forget(gsn)
 		return
 	}
 	atomic.AddUint64(&r.Stats.TxPackets, 1)
 	atomic.AddUint64(&r.Stats.TxBytes, uint64(len(pkt)))
-	sess.rtx.Track(gsn, pkt, 0, 0, false, time.Now())
+	atomic.AddUint64(&sess.Stats.TxPackets, 1)
+	atomic.AddUint64(&sess.Stats.TxBytes, uint64(len(pkt)))
 }
 
 // sendFECParity seals and sends one parity shard for sess on the healthiest currently
@@ -690,6 +773,7 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 
 	var tunnelIP net.IP
 	var sessionIndex uint32
+	allocated := false
 	if existing != nil {
 		tunnelIP = existing.tunnelIP
 		sessionIndex = existing.sessionIndex
@@ -701,6 +785,7 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 		}
 		tunnelIP = ip
 		sessionIndex = r.newSessionIndex()
+		allocated = true
 	}
 
 	payload, err := HandshakeRespPayload{
@@ -723,7 +808,14 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 		return
 	}
 
-	rs := newRelaySession(r, sessionIndex, sess, tunnelIP, r.cfg)
+	rs, err := newRelaySession(r, sessionIndex, sess, tunnelIP, r.cfg)
+	if err != nil {
+		log.Printf("bond: create relay session: %v", err)
+		if allocated {
+			r.pool.Release(tunnelIP)
+		}
+		return
+	}
 	p0, _ := rs.getOrCreatePath(PathZero, src)
 	p0.SetActive()
 
@@ -732,6 +824,9 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 	r.byTunnelIP[tunnelIP.String()] = rs
 	r.byClientKey[clientKey] = rs
 	r.mu.Unlock()
+	if existing != nil && existing.bulkPacer != nil {
+		existing.bulkPacer.Close()
+	}
 
 	out := make([]byte, proto.OuterPrefixLen+len(respMsg))
 	if err := proto.MarshalOuter(out, proto.OuterHeader{Type: proto.TypeHandshakeResp, Version: proto.Version, SessionIndex: sessionIndex}); err != nil {

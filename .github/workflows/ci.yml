@@ -161,3 +161,5 @@ jobs:
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase3.sh
       - name: Run phase 4 gates (real loss, FEC recovery, path-death survivability)
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh
+      - name: Run phase 7 gate (loaded BULK download, SSH-shaped RTT within 25%)
+        run: sudo -E env "PATH=$PATH" bash testbed/run_phase7.sh
