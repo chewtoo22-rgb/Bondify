@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.x'
+          go-version: '1.25'
           cache: true
       - name: Unit and race tests
         run: go test ./... -race -count=1
@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.x'
+          go-version: '1.25'
           cache: true
       - name: Build
         env:
@@ -90,35 +90,32 @@ jobs:
   android:
     needs: verify
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.x'
-          cache: true
-      - uses: android-actions/setup-android@v3
-      - name: Install Android components
-        run: yes | sdkmanager 'platforms;android-34' 'build-tools;34.0.0' 'ndk;26.1.10909125'
-      - name: Install gomobile
+      - name: Ensure Android SDK components
         run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init
-      - name: Build APK
-        run: ./gradlew --no-daemon :app:assembleDebug
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+      - name: Build Android tests and APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
       - name: Package APK
         run: |
-          mkdir -p ../dist
-          cp app/build/outputs/apk/debug/app-debug.apk ../dist/bondify-android-debug.apk
-          cd ../dist
-          sha256sum bondify-android-debug.apk > bondify-android-debug.apk.sha256
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/bondify-android-debug.apk
+          sha256sum dist/bondify-android-debug.apk > dist/bondify-android-debug.apk.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: bondify-android-debug
