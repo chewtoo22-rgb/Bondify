@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Unit and race tests
+        run: go test ./... -race -count=1
+      - name: Vet
+        run: go vet ./...
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: bondify-linux-amd64
+            goos: linux
+            goarch: amd64
+            package: ./desktop/cmd/bondify
+            output: bondify
+          - name: bondify-linux-arm64
+            goos: linux
+            goarch: arm64
+            package: ./desktop/cmd/bondify
+            output: bondify
+          - name: bondify-windows-amd64
+            goos: windows
+            goarch: amd64
+            package: ./desktop/cmd/bondify
+            output: bondify.exe
+          - name: bondify-relay-linux-amd64
+            goos: linux
+            goarch: amd64
+            package: ./relay/cmd/bondify-relay
+            output: bondify-relay
+          - name: bondify-relay-linux-arm64
+            goos: linux
+            goarch: arm64
+            package: ./relay/cmd/bondify-relay
+            output: bondify-relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.name }}"
+          go build -trimpath -ldflags='-s -w' -o "dist/${{ matrix.name }}/${{ matrix.output }}" "${{ matrix.package }}"
+          if [[ "${{ matrix.name }}" == bondify-relay-* ]]; then
+            cp relay/install.sh "dist/${{ matrix.name }}/install.sh"
+            chmod +x "dist/${{ matrix.name }}/install.sh"
+          fi
+          if [[ "${{ matrix.name }}" == bondify-windows-* ]]; then
+            cp desktop/windows/install.ps1 "dist/${{ matrix.name }}/install.ps1"
+          fi
+          tar -C dist -czf "dist/${{ matrix.name }}.tar.gz" "${{ matrix.name }}"
+          sha256sum "dist/${{ matrix.name }}.tar.gz" > "dist/${{ matrix.name }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/${{ matrix.name }}.tar.gz
+            dist/${{ matrix.name }}.tar.gz.sha256
+          if-no-files-found: error
+
+  android:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Ensure Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+      - name: Build Android tests and APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
+      - name: Package APK
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/bondify-android-debug.apk
+          sha256sum dist/bondify-android-debug.apk > dist/bondify-android-debug.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bondify-android-debug
+          path: |
+            dist/bondify-android-debug.apk
+            dist/bondify-android-debug.apk.sha256
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, android]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Consolidate checksums
+        run: |
+          set -euo pipefail
+          find release-assets -maxdepth 1 -type f -name '*.sha256' -print0 | sort -z | xargs -0 cat > release-assets/SHA256SUMS
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: true
+          files: release-assets/*
