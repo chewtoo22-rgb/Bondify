@@ -66,6 +66,9 @@ type Path struct {
 	sendPSN atomic.Uint32
 	recvPSN atomic.Uint32
 
+	// inflight is the classified BULK occupancy reserved against CWND. Applying this
+	// experimental controller as a hard window to every packet regresses the already-gated
+	// unclassified data plane; Phase 7 only needs real accounting for its BULK reserve.
 	inflight atomic.Int64
 	rttMin   atomic.Int64
 	peerRTT  atomic.Int64
@@ -106,6 +109,28 @@ func (p *Path) ID() uint8          { return p.id }
 func (p *Path) State() sched.State { return sched.State(p.state.Load()) }
 func (p *Path) Role() sched.Role   { return sched.Role(p.role.Load()) }
 func (p *Path) InFlight() int64    { return p.inflight.Load() }
+
+func (p *Path) addInFlight(n int) {
+	if n > 0 {
+		p.inflight.Add(int64(n))
+	}
+}
+
+func (p *Path) releaseInFlight(n int) {
+	if n <= 0 {
+		return
+	}
+	for {
+		old := p.inflight.Load()
+		next := old - int64(n)
+		if next < 0 {
+			next = 0
+		}
+		if p.inflight.CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
 
 // CWND is core/cc's live BBR-style congestion window for this path (ARCHITECTURE.md
 // §2.4). Only the client side feeds it real samples today (see HandleProbeAck) -- the

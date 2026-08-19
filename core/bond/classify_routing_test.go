@@ -1,6 +1,7 @@
 package bond
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -80,7 +81,6 @@ func newSendTestTunnel(t *testing.T, n int) (*ClientTunnel, []*net.UDPConn) {
 		sched:        sched.NewRoundRobin(),
 		reorderBuf:   reorder.New(reorder.DefaultDeadlineMin, 0),
 		ack:          newACKState(),
-		rtx:          newRetransmitQueue(),
 	}
 	peers := make([]*net.UDPConn, n)
 	paths := make([]*Path, n)
@@ -95,6 +95,11 @@ func newSendTestTunnel(t *testing.T, n int) (*ClientTunnel, []*net.UDPConn) {
 		view[i] = p
 	}
 	tun.schedPathView.Store(view)
+	tun.rtx = newRetransmitQueue(func(pathID uint8, bytes int) {
+		if p := tun.pathByID(pathID); p != nil {
+			p.releaseInFlight(bytes)
+		}
+	})
 	return tun, peers
 }
 
@@ -192,10 +197,16 @@ func TestSendClassifiedInteractiveAndBulkGoThroughScheduler(t *testing.T) {
 	if !recvWithin(t, peers[0], time.Second) {
 		t.Fatal("INTERACTIVE packet never reached the only path via the scheduler")
 	}
+	if got := tun.paths[0].InFlight(); got != 0 {
+		t.Fatalf("INTERACTIVE packet consumed BULK headroom: in-flight=%d", got)
+	}
 
 	tun.sendClassified(buildTCPPacket(443)) // HTTPS -> classify.Bulk (default)
 	if !recvWithin(t, peers[0], time.Second) {
 		t.Fatal("BULK packet never reached the only path via the headroom-capped scheduler")
+	}
+	if got := tun.paths[0].InFlight(); got == 0 {
+		t.Fatal("BULK packet did not consume congestion-window headroom")
 	}
 }
 
@@ -206,6 +217,48 @@ func TestSendClassifiedNotReachedWhenClassifyDisabled(t *testing.T) {
 	tun, _ := newSendTestTunnel(t, 1)
 	if tun.classify {
 		t.Fatal("classify should default to false (opt-in, existing throughput gates unaffected)")
+	}
+}
+
+func TestBulkPacerWaitsForHeadroomAndACKReleasesInFlight(t *testing.T) {
+	tun, peers := newSendTestTunnel(t, 1)
+	tun.classify = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := tun.startBulkPacer(ctx); err != nil {
+		t.Fatalf("startBulkPacer: %v", err)
+	}
+	defer tun.bulkPacer.Load().Close()
+	if pacing := tun.Diagnostics().Aggregate.BulkPacing; pacing == nil || pacing.QueueCapacity != DefaultBulkQueuePackets {
+		t.Fatalf("diagnostics bulk_pacing = %+v, want active queue capacity %d", pacing, DefaultBulkQueuePackets)
+	}
+
+	path := tun.paths[0]
+	path.inflight.Store(path.CWND())
+	pkt := buildTCPPacket(443) // BULK
+	tun.sendClassified(pkt)
+	if recvWithin(t, peers[0], 50*time.Millisecond) {
+		t.Fatal("BULK packet bypassed the congestion-window headroom cap")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && tun.bulkPacer.Load().Snapshot().SchedulerWaits == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if tun.bulkPacer.Load().Snapshot().SchedulerWaits == 0 {
+		t.Fatal("pacer did not report waiting for scheduler headroom")
+	}
+
+	path.inflight.Store(0)
+	if !recvWithin(t, peers[0], time.Second) {
+		t.Fatal("queued BULK packet was not sent after headroom became available")
+	}
+	if got := path.InFlight(); got != int64(len(pkt)) {
+		t.Fatalf("in-flight after send = %d, want packet size %d", got, len(pkt))
+	}
+	tun.rtx.Acknowledge(AckPayload{HasCumulative: true, CumulativeGSN: 0}, time.Now())
+	if got := path.InFlight(); got != 0 {
+		t.Fatalf("in-flight after ACK = %d, want 0", got)
 	}
 }
 
@@ -231,7 +284,7 @@ func TestCapByHeadroomExcludesPathsOverThreshold(t *testing.T) {
 		fakeSchedPath{id: 2, inFlight: 89, cwnd: 100}, // 89% -- just under the cap
 		fakeSchedPath{id: 3, inFlight: 90, cwnd: 100}, // exactly at the cap -- excluded (strict <)
 	}
-	got := capByHeadroom(paths, bulkHeadroomFraction)
+	got := capByHeadroom(paths, bulkHeadroomFraction, 1)
 	gotIDs := map[uint8]bool{}
 	for _, p := range got {
 		gotIDs[p.ID()] = true

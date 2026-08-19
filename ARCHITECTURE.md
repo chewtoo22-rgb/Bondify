@@ -200,10 +200,13 @@ gates:
 2. **HoL gate** (the most important test in the repo) — fast(100Mbps/15ms) + slow(5Mbps/200ms/1%)
    must never underperform the fast path alone.
 3. **Protect-loop gate** — no packet from a protected uplink socket ever appears on the TUN fd.
-4. **Survivability gate** — path death/birth/flapping complete a 100MB transfer with zero resets.
-5. **MTU gate** — 1500-byte payload over a 1400-byte-MTU path completes (MSS clamping works).
-6. **Fuzz gate** — `proto` decode survives fuzzing with zero panics.
-7. **Nonce gate** — no nonce reused across paths (static/runtime assertion).
+4. **Mixed-traffic gate** — shape both directions, run a reverse BULK transfer plus a
+   persistent port-22 INTERACTIVE probe, require meaningful bulk goodput and loaded median
+   RTT no more than 1.25x unloaded. `testbed/run_phase7.sh` is the executable definition.
+5. **Survivability gate** — path death/birth/flapping complete a 100MB transfer with zero resets.
+6. **MTU gate** — 1500-byte payload over a 1400-byte-MTU path completes (MSS clamping works).
+7. **Fuzz gate** — `proto` decode survives fuzzing with zero panics.
+8. **Nonce gate** — no nonce reused across paths (static/runtime assertion).
 
 ## 7. Security threat model
 
@@ -226,8 +229,10 @@ reporting, no account, no default relay logging; reproducible builds.
 - Bonding increases latency by roughly the relay round trip; it reduces variance, not latency.
 - Relay bandwidth is a hard ceiling; relay RTT is a latency floor.
 - Wildly mismatched links should be BACKUP, not BONDED.
-- Bondify looks like a VPN to the internet, with all that implies (geoblocking risk); split
-  tunnelling with a curated default bypass list ships enabled.
+- Bondify looks like a VPN to the internet, with all that implies (geoblocking risk);
+  desktop full-tunnel mode enables a curated LAN/private/link-local/CGNAT IPv4 bypass set
+  and accepts explicit CIDRs. Third-party service IPs are not hard-coded because they are
+  unstable and provider-controlled.
 - REDUNDANT mode multiplies data usage by the duplication factor.
 - You need a relay. That's physics, not a business model — the relay software is free.
 

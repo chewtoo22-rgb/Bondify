@@ -6,7 +6,10 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/windows"
@@ -75,6 +78,69 @@ func AddHostRoute(dstIP net.IP, viaDev string) error {
 		return fmt.Errorf("tun: add route: %w", err)
 	}
 	return nil
+}
+
+// RouteFor snapshots Windows' current best route, including the next hop required to
+// recreate it as a more-specific split-tunnel bypass after the default route changes.
+func RouteFor(dst net.IP) (PhysicalRoute, error) {
+	script := fmt.Sprintf(
+		"$r = Find-NetRoute -RemoteIPAddress '%s' | "+
+			"Where-Object { $_.PSObject.Properties.Name -contains 'DestinationPrefix' } | "+
+			"Select-Object -First 1; "+
+			"if ($null -eq $r) { throw 'no route' }; "+
+			"Write-Output $r.InterfaceIndex; Write-Output $r.NextHop",
+		dst.String(),
+	)
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	if err != nil {
+		return PhysicalRoute{}, fmt.Errorf("tun: Find-NetRoute %s: %w: %s", dst, err, out)
+	}
+	lines := strings.Fields(string(out))
+	if len(lines) < 1 {
+		return PhysicalRoute{}, fmt.Errorf("tun: empty Find-NetRoute result for %s", dst)
+	}
+	idx, err := strconv.Atoi(lines[0])
+	if err != nil || idx < 1 {
+		return PhysicalRoute{}, fmt.Errorf("tun: invalid Find-NetRoute interface %q", lines[0])
+	}
+	route := PhysicalRoute{InterfaceIndex: idx}
+	if ifi, err := net.InterfaceByIndex(idx); err == nil {
+		route.Device = ifi.Name
+	}
+	if len(lines) > 1 {
+		if gateway := net.ParseIP(lines[1]); gateway != nil && !gateway.IsUnspecified() {
+			route.Gateway = gateway
+		}
+	}
+	return route, nil
+}
+
+// AddBypassRoute mirrors Linux's route cloning using Windows' NetTCPIP cmdlets.
+func AddBypassRoute(cidr string, route PhysicalRoute) (added bool, err error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() {
+		return false, fmt.Errorf("tun: invalid IPv4 bypass CIDR %q", cidr)
+	}
+	cidr = prefix.Masked().String()
+	if route.InterfaceIndex < 1 {
+		return false, fmt.Errorf("tun: bypass route %s has no interface index", cidr)
+	}
+	nextHop := ""
+	if gateway := route.Gateway.To4(); gateway != nil {
+		nextHop = fmt.Sprintf(" -NextHop '%s'", gateway.String())
+	}
+	script := fmt.Sprintf(
+		"$existing = Get-NetRoute -DestinationPrefix '%s' -ErrorAction SilentlyContinue; "+
+			"if ($null -ne $existing) { Write-Output 'existing'; exit 0 }; "+
+			"New-NetRoute -DestinationPrefix '%s' -InterfaceIndex %d%s "+
+			"-PolicyStore ActiveStore -ErrorAction Stop | Out-Null; Write-Output 'added'",
+		cidr, cidr, route.InterfaceIndex, nextHop,
+	)
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("tun: add bypass route %s: %w: %s", cidr, err, out)
+	}
+	return strings.Contains(string(out), "added"), nil
 }
 
 // DelRoute removes a previously-added route/CIDR. Unlike AddHostRoute/Configure, this uses
