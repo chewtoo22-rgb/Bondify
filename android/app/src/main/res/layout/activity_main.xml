@@ -1,71 +1,217 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="24dp"
+    android:fillViewport="true"
     android:background="@color/bondify_bg">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/app_name"
-        android:textSize="28sp"
-        android:textStyle="bold"
-        android:textColor="@color/bondify_primary"
-        android:layout_marginBottom="4dp" />
-
-    <TextView
-        android:id="@+id/myKeyText"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="12sp"
-        android:textIsSelectable="true"
-        android:layout_marginBottom="24dp" />
+        android:orientation="vertical"
+        android:paddingStart="20dp"
+        android:paddingTop="22dp"
+        android:paddingEnd="20dp"
+        android:paddingBottom="30dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/label_relay_addr"
-        android:textSize="14sp"
-        android:layout_marginBottom="4dp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="BONDIFY"
+            android:textColor="@color/bondify_primary"
+            android:textSize="30sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
 
-    <EditText
-        android:id="@+id/relayAddrInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:inputType="textUri"
-        android:hint="relay.example.com:51820"
-        android:layout_marginBottom="16dp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:text="MULTI-WAN CONTROL DECK"
+            android:textColor="@color/bondify_text_secondary"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.12" />
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="@string/label_relay_pubkey"
-        android:textSize="14sp"
-        android:layout_marginBottom="4dp" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical"
+            android:padding="18dp"
+            android:background="@drawable/bondify_panel">
 
-    <EditText
-        android:id="@+id/relayPubKeyInput"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:inputType="text"
-        android:layout_marginBottom="24dp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="SYSTEM STATUS"
+                android:textColor="@color/bondify_text_secondary"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.1" />
 
-    <Button
-        android:id="@+id/connectButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/btn_connect"
-        android:backgroundTint="@color/bondify_accent"
-        android:layout_marginBottom="16dp" />
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/status_disconnected"
+                android:textColor="@color/bondify_warning"
+                android:textSize="22sp"
+                android:textStyle="bold" />
 
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/status_disconnected"
-        android:textSize="16sp"
-        android:gravity="center" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Encrypted packet-level bonding • no account • no telemetry"
+                android:textColor="@color/bondify_text_secondary"
+                android:textSize="13sp" />
+        </LinearLayout>
 
-</LinearLayout>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:orientation="vertical"
+            android:padding="18dp"
+            android:background="@drawable/bondify_panel">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="CLIENT IDENTITY"
+                android:textColor="@color/bondify_text_secondary"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.1" />
+
+            <TextView
+                android:id="@+id/myKeyText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="@color/bondify_primary"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:textIsSelectable="true" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="22dp"
+            android:text="RELAY CONFIGURATION"
+            android:textColor="@color/bondify_text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="@string/label_relay_addr"
+            android:textColor="@color/bondify_text_secondary"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/relayAddrInput"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:layout_marginTop="7dp"
+            android:background="@drawable/bondify_input"
+            android:gravity="center_vertical"
+            android:hint="relay.example.com:51820"
+            android:hintTextColor="@color/bondify_text_muted"
+            android:inputType="textUri"
+            android:singleLine="true"
+            android:textColor="@color/bondify_text"
+            android:textColorHighlight="@color/bondify_primary"
+            android:textCursorDrawable="@null"
+            android:textSize="15sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/label_relay_pubkey"
+            android:textColor="@color/bondify_text_secondary"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/relayPubKeyInput"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:layout_marginTop="7dp"
+            android:background="@drawable/bondify_input"
+            android:gravity="center_vertical"
+            android:hint="Paste relay public key"
+            android:hintTextColor="@color/bondify_text_muted"
+            android:inputType="text"
+            android:singleLine="true"
+            android:textColor="@color/bondify_text"
+            android:textCursorDrawable="@null"
+            android:textSize="15sp" />
+
+        <Button
+            android:id="@+id/connectButton"
+            android:layout_width="match_parent"
+            android:layout_height="58dp"
+            android:layout_marginTop="24dp"
+            android:backgroundTint="@color/bondify_accent"
+            android:text="@string/btn_connect"
+            android:textAllCaps="true"
+            android:textColor="@color/bondify_bg"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.08" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:orientation="horizontal"
+            android:weightSum="3">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="72dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="5dp"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:background="@drawable/bondify_panel">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="MODE" android:textColor="@color/bondify_text_muted" android:textSize="10sp" android:textStyle="bold" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="SPEED" android:textColor="@color/bondify_primary" android:textSize="14sp" android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="72dp"
+                android:layout_weight="1"
+                android:layout_marginStart="5dp"
+                android:layout_marginEnd="5dp"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:background="@drawable/bondify_panel">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="FEC" android:textColor="@color/bondify_text_muted" android:textSize="10sp" android:textStyle="bold" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="READY" android:textColor="@color/bondify_success" android:textSize="14sp" android:textStyle="bold" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="72dp"
+                android:layout_weight="1"
+                android:layout_marginStart="5dp"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:background="@drawable/bondify_panel">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="PRIVACY" android:textColor="@color/bondify_text_muted" android:textSize="10sp" android:textStyle="bold" />
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="5dp" android:text="LOCAL" android:textColor="@color/bondify_success" android:textSize="14sp" android:textStyle="bold" />
+            </LinearLayout>
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>
