@@ -35,7 +35,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("pairbond-proxy: create: %v", err)
 	}
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 	log.Printf("pairbond-proxy: listening=%s relay=%s wan-local=%s", proxy.LocalAddr(), *relay, *wanLocal)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
