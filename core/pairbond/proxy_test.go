@@ -13,7 +13,7 @@ func TestPeerProxyForwardsOpaqueDatagramsAndRevokes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("relay listen: %v", err)
 	}
-	defer relay.Close()
+	defer func() { _ = relay.Close() }()
 
 	proxy, err := NewPeerProxy(ProxyConfig{
 		ListenAddr:    "127.0.0.1:0",
@@ -33,7 +33,7 @@ func TestPeerProxyForwardsOpaqueDatagramsAndRevokes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial host path: %v", err)
 	}
-	defer host.Close()
+	defer func() { _ = host.Close() }()
 
 	wantUp := []byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x01}
 	if _, err := host.Write(wantUp); err != nil {
