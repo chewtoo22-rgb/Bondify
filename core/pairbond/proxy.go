@@ -20,6 +20,11 @@ type ProxyConfig struct {
 	ListenAddr    string
 	RelayAddr     string
 	AllowedHostIP net.IP
+	// WANLocalAddr optionally pins the relay-facing UDP socket to a peer uplink
+	// source address. Production peers normally leave this empty and let their OS
+	// routing choose the WAN; deterministic netns gates use it to select a shaped
+	// peer uplink without weakening the ciphertext-only forwarding model.
+	WANLocalAddr string
 }
 
 // PeerProxy forwards opaque Bondify UDP packets between one paired LAN host and
@@ -33,7 +38,7 @@ type PeerProxy struct {
 	hostMu   sync.RWMutex
 	hostAddr *net.UDPAddr
 
-	revoked  atomic.Bool
+	revoked   atomic.Bool
 	closeOnce sync.Once
 	done      chan struct{}
 }
@@ -55,7 +60,16 @@ func NewPeerProxy(cfg ProxyConfig) (*PeerProxy, error) {
 		_ = lan.Close()
 		return nil, fmt.Errorf("pairbond: resolve relay address: %w", err)
 	}
-	wan, err := net.DialUDP("udp", nil, raddr)
+	var wanLocal *net.UDPAddr
+	if cfg.WANLocalAddr != "" {
+		ip := net.ParseIP(cfg.WANLocalAddr)
+		if ip == nil {
+			_ = lan.Close()
+			return nil, fmt.Errorf("pairbond: invalid WAN local address %q", cfg.WANLocalAddr)
+		}
+		wanLocal = &net.UDPAddr{IP: ip}
+	}
+	wan, err := net.DialUDP("udp", wanLocal, raddr)
 	if err != nil {
 		_ = lan.Close()
 		return nil, fmt.Errorf("pairbond: dial relay: %w", err)
