@@ -1,7 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bondify_primary">#1B2A4A</color>
-    <color name="bondify_primary_dark">#101A30</color>
-    <color name="bondify_accent">#3DDC97</color>
-    <color name="bondify_bg">#F5F7FA</color>
+    <color name="bondify_primary">#7CE7FF</color>
+    <color name="bondify_primary_dark">#07111F</color>
+    <color name="bondify_accent">#43F5A7</color>
+    <color name="bondify_bg">#050B14</color>
+    <color name="bondify_surface">#0B1626</color>
+    <color name="bondify_surface_alt">#101F33</color>
+    <color name="bondify_border">#24415F</color>
+    <color name="bondify_text">#F4F8FC</color>
+    <color name="bondify_text_secondary">#9EB3C8</color>
+    <color name="bondify_text_muted">#6F879E</color>
+    <color name="bondify_success">#43F5A7</color>
+    <color name="bondify_warning">#FFC857</color>
+    <color name="bondify_danger">#FF6B7A</color>
 </resources>

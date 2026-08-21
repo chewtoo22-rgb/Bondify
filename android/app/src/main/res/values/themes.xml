@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.Bondify" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+<resources>
+    <style name="Theme.Bondify" parent="Theme.MaterialComponents.NoActionBar">
         <item name="colorPrimary">@color/bondify_primary</item>
         <item name="colorPrimaryDark">@color/bondify_primary_dark</item>
         <item name="colorAccent">@color/bondify_accent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/bondify_bg</item>
+        <item name="android:navigationBarColor">@color/bondify_bg</item>
+        <item name="android:windowBackground">@color/bondify_bg</item>
+        <item name="android:textColorPrimary">@color/bondify_text</item>
+        <item name="android:textColorSecondary">@color/bondify_text_secondary</item>
+        <item name="android:fontFamily">sans</item>
     </style>
 </resources>
