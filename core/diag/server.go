@@ -23,8 +23,8 @@ import (
 type Snapshot func() any
 
 // Server is a minimal HTTP server exposing one Snapshot as JSON plus a liveness check.
-// It is not a general-purpose API: no auth, no TLS, one read-only endpoint -- appropriate
-// only because it is meant to bind to loopback only, never a routable address.
+// It is not a general-purpose API: no auth, no TLS, read-only endpoints -- appropriate only
+// because it is meant to bind to loopback only, never a routable address.
 type Server struct {
 	http *http.Server
 	ln   net.Listener
@@ -32,10 +32,10 @@ type Server struct {
 
 // NewServer builds a diagnostics server bound to addr (host:port). addr should resolve to
 // a loopback address (127.0.0.1/::1) -- binding anywhere else would expose live network
-// statistics, including relay-side per-client path addresses, to whatever network that
-// address is reachable from. NewServer does not silently rewrite a non-loopback addr; it
-// logs a loud warning instead, since a caller may have a deliberate reason (e.g. a
-// container's own isolated network namespace) and refusing outright would be presumptuous.
+// statistics to whatever network that address is reachable from. NewServer does not
+// silently rewrite a non-loopback addr; it logs a loud warning instead, since a caller may
+// have a deliberate reason (e.g. a container's own isolated network namespace) and refusing
+// outright would be presumptuous.
 func NewServer(addr string, snap Snapshot) (*Server, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -43,9 +43,8 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 	}
 	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && !tcpAddr.IP.IsLoopback() {
 		log.Printf("diag: WARNING: diagnostics endpoint bound to non-loopback address %s -- "+
-			"live tunnel statistics (including per-path remote addresses) are reachable from "+
-			"anywhere that can route to it. Bind to 127.0.0.1/::1 unless you specifically "+
-			"intend this.", ln.Addr())
+			"live tunnel statistics are reachable from anywhere that can route to it. Bind "+
+			"to 127.0.0.1/::1 unless you specifically intend this.", ln.Addr())
 	}
 
 	mux := http.NewServeMux()
@@ -61,6 +60,23 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(snap()); err != nil {
 			log.Printf("diag: encode snapshot: %v", err)
+		}
+	})
+	mux.HandleFunc("/api/v1/diagnostics/redacted", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		redacted, err := RedactSnapshot(snap())
+		if err != nil {
+			log.Printf("diag: redact snapshot: %v", err)
+			http.Error(w, "diagnostics redaction failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(redacted); err != nil {
+			log.Printf("diag: encode redacted snapshot: %v", err)
 		}
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
