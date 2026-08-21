@@ -41,10 +41,6 @@ jobs:
       - name: go vet (host arch only)
         if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: go vet ./...
-      # go vet cross-compiled: the default vet step above only typechecks linux-tagged
-      # files (its build context is the host). Windows has its own build-tagged files as
-      # of phase 6 (core/tun/windows.go, desktop/cmd/bondify/tray_windows.go) that
-      # otherwise never get statically checked in CI at all.
       - name: go vet (windows)
         if: matrix.goos == 'windows'
         env:
@@ -57,18 +53,14 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build ./core/...
-      # relay/ is server-side and stays Linux-only by design (ARCHITECTURE.md's phase plan
-      # scopes Windows to the desktop *client*, phase 6). desktop/cmd, as of phase 6, has
-      # real Windows support (wintun via core/tun/windows.go's IP_UNICAST_IF egress
-      # pinning + netsh interface config, plus a native tray icon) and builds for both.
-      - name: Build relay (linux only -- server-side, see comment above)
+      - name: Build relay (linux only -- server-side)
         if: matrix.goos == 'linux'
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: go build ./relay/...
-      - name: Build desktop CLI (linux + windows; see comment above)
+      - name: Build desktop CLI (linux + windows)
         if: matrix.goos == 'linux' || matrix.goos == 'windows'
         env:
           GOOS: ${{ matrix.goos }}
@@ -84,13 +76,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
-      # `version: latest` on golangci-lint-action@v6 resolves to the newest v1.x release
-      # (v1.64.8, the last one ever cut on that line), which is built with go1.24 -- too
-      # old to parse a go.mod targeting go1.25.0 (required by the
-      # golang.org/x/{mobile,mod,net,sync,tools,crypto,sys} versions gomobile bind needs;
-      # see mobile/mobile.go). v6 of the action can't run v2 binaries at all ("golangci-lint
-      # v2 is not supported by golangci-lint-action v6, you must update to
-      # golangci-lint-action v7"), so both the action and the lint version need bumping.
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
@@ -120,22 +105,12 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      # GitHub's ubuntu-latest runner images ship the Android SDK and several NDK versions
-      # preinstalled (see actions/runner-images) -- this just makes sure the exact platform,
-      # build-tools, and NDK versions mobile/build_aar.sh needs are present, which is a
-      # no-op download on a runner that already has them cached and a real (if slower) one
-      # otherwise, rather than assuming a specific preinstalled set.
       - name: Ensure Android SDK components
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
-      # mobile/build_aar.sh installs gomobile/gobind itself if missing, then `gomobile bind`
-      # -- both invoked automatically by android/app/build.gradle.kts's generateMobileAar
-      # task, wired into Gradle's preBuild so a plain assembleDebug exercises the whole
-      # chain: Go core -> gomobile-bound AAR -> Kotlin app, the same real chain
-      # verified locally before this workflow was written (see ARCHITECTURE.md §9).
       - name: Android unit tests and debug APK
         working-directory: android
         run: |
@@ -163,3 +138,5 @@ jobs:
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh
       - name: Run phase 7 gate (loaded BULK download, SSH-shaped RTT within 25%)
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase7.sh
+      - name: Run chaos gate (heterogeneous MTU + repeated path flaps)
+        run: sudo -E env "PATH=$PATH" bash testbed/run_chaos.sh
