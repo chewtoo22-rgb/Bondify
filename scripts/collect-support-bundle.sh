@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DIAG_URL="${BONDIFY_DIAG_URL:-http://127.0.0.1:8080/api/v1/diagnostics/redacted}"
+DIAG_URL="${BONDIFY_DIAG_URL:-http://127.0.0.1:9090/api/v1/diagnostics/redacted}"
 OUT_DIR="${1:-bondify-support-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 umask 077
