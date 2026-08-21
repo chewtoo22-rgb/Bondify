@@ -72,3 +72,46 @@ func TestRelayNATRebindAcceptsAuthenticatedProbeAndRepliesToNewSource(t *testing
 	}
 	t.Fatalf("relay did not update path 0 remote after authenticated rebind: old=%v current=%v want=%v", oldRemote, path.RemoteAddr(), newRemote)
 }
+
+func TestRelayNATRebindRejectsUnauthenticatedSourceChange(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, sessionIndex := mustClientTunnel(t, r, relayKP)
+
+	sess := relaySessionFor(r, sessionIndex)
+	if sess == nil {
+		t.Fatal("relay session missing after handshake")
+	}
+	path := sess.pathByID(0)
+	if path == nil || path.RemoteAddr() == nil {
+		t.Fatal("relay path 0 missing after handshake")
+	}
+	oldRemote := path.RemoteAddr()
+
+	relayAddr := r.conn.LocalAddr().(*net.UDPAddr)
+	attacker, err := net.DialUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")}, relayAddr)
+	if err != nil {
+		t.Fatalf("dial alternate source: %v", err)
+	}
+	defer attacker.Close()
+
+	payload, err := marshalCBOR(ProbePayload{SentAtUnixNano: time.Now().UnixNano(), SentPSN: 0})
+	if err != nil {
+		t.Fatalf("marshal probe: %v", err)
+	}
+	pkt, err := sealControl(tun.sess, proto.TypeProbe, sessionIndex, 0, payload)
+	if err != nil {
+		t.Fatalf("seal probe: %v", err)
+	}
+	// Preserve a syntactically valid outer packet and nonce while corrupting the AEAD tag.
+	// The relay must authenticate first and only then accept a new source tuple.
+	pkt[len(pkt)-1] ^= 0x01
+
+	if _, err := attacker.Write(pkt); err != nil {
+		t.Fatalf("write unauthenticated probe: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if cur := path.RemoteAddr(); cur == nil || !udpAddrEqual(cur, oldRemote) {
+		t.Fatalf("unauthenticated packet changed relay return address: old=%v current=%v", oldRemote, cur)
+	}
+}
