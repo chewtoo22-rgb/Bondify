@@ -1,0 +1,86 @@
+name: Phase 8 Release Candidate
+
+on:
+  push:
+    branches:
+      - release/phase8-rc1
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - run: go test ./... -race -count=1
+      - run: go vet ./...
+
+  windows:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Build Windows amd64 package
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p dist/bondify-windows-amd64
+          go build -trimpath -ldflags='-s -w' -o dist/bondify-windows-amd64/bondify.exe ./desktop/cmd/bondify
+          cp desktop/windows/install.ps1 dist/bondify-windows-amd64/install.ps1
+          tar -C dist -czf dist/bondify-windows-amd64.tar.gz bondify-windows-amd64
+          sha256sum dist/bondify-windows-amd64.tar.gz > dist/bondify-windows-amd64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bondify-windows-amd64-phase8-rc1
+          path: |
+            dist/bondify-windows-amd64.tar.gz
+            dist/bondify-windows-amd64.tar.gz.sha256
+          retention-days: 30
+
+  android:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Ensure Android SDK components
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+      - name: Build Android APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
+      - name: Package APK
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/bondify-android-phase8-rc1.apk
+          sha256sum dist/bondify-android-phase8-rc1.apk > dist/bondify-android-phase8-rc1.apk.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bondify-android-phase8-rc1
+          path: |
+            dist/bondify-android-phase8-rc1.apk
+            dist/bondify-android-phase8-rc1.apk.sha256
+          retention-days: 30
