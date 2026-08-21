@@ -27,7 +27,11 @@ func TestRelayNATRebindAcceptsAuthenticatedProbeAndRepliesToNewSource(t *testing
 	if err != nil {
 		t.Fatalf("dial rebound socket: %v", err)
 	}
-	defer rebound.Close()
+	t.Cleanup(func() {
+		if err := rebound.Close(); err != nil {
+			t.Errorf("close rebound socket: %v", err)
+		}
+	})
 	newRemote := rebound.LocalAddr().(*net.UDPAddr)
 	if udpAddrEqual(oldRemote, newRemote) {
 		t.Fatalf("test did not obtain a new source tuple: old=%v new=%v", oldRemote, newRemote)
@@ -92,7 +96,11 @@ func TestRelayNATRebindRejectsUnauthenticatedSourceChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial alternate source: %v", err)
 	}
-	defer attacker.Close()
+	t.Cleanup(func() {
+		if err := attacker.Close(); err != nil {
+			t.Errorf("close alternate source: %v", err)
+		}
+	})
 
 	payload, err := marshalCBOR(ProbePayload{SentAtUnixNano: time.Now().UnixNano(), SentPSN: 0})
 	if err != nil {
