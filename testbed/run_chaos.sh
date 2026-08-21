@@ -26,10 +26,12 @@ go build -o "$BUILD/bondify" ./desktop/cmd/bondify
 bash "$TOPO" down 2>/dev/null || true
 bash "$TOPO" up
 
-ip netns exec bondify-client ip link set dev v-cli-wan1 mtu 1280
-ip netns exec bondify-relay  ip link set dev v-rel-wan1 mtu 1280
-ip netns exec bondify-client ip link set dev v-cli-wan2 mtu 1500
-ip netns exec bondify-relay  ip link set dev v-rel-wan2 mtu 1500
+# two_path.sh names its two client uplinks wan0 and wan1. Keep one path at the
+# IPv6-minimum physical MTU and the other at Ethernet's usual 1500 bytes.
+ip netns exec bondify-client ip link set dev v-cli-wan0 mtu 1280
+ip netns exec bondify-relay  ip link set dev v-rel-wan0 mtu 1280
+ip netns exec bondify-client ip link set dev v-cli-wan1 mtu 1500
+ip netns exec bondify-relay  ip link set dev v-rel-wan1 mtu 1500
 
 ip netns exec bondify-relay "$PWD/$BUILD/bondify-relay" \
   -listen 10.99.0.1:51820 -pool 10.77.0.0/24 -tun bondify0 \
@@ -68,7 +70,7 @@ FLOW_PID=$!
 
 sleep 3
 for cycle in 1 2 3 4 5 6; do
-  if (( cycle % 2 == 1 )); then iface=v-cli-wan1; else iface=v-cli-wan2; fi
+  if (( cycle % 2 == 1 )); then iface=v-cli-wan0; else iface=v-cli-wan1; fi
   log "cycle $cycle: dropping $iface for 2s"
   ip netns exec bondify-client iptables -I OUTPUT 1 -o "$iface" -j DROP
   ip netns exec bondify-client iptables -I INPUT 1 -i "$iface" -j DROP
