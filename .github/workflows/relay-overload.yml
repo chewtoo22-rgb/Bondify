@@ -1,0 +1,23 @@
+name: Relay Overload
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  overload:
+    name: bounded relay backpressure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Install network tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 iptables iperf3 curl
+      - name: Run relay overload gate
+        run: sudo -E env "PATH=$PATH" bash testbed/run_relay_overload.sh
