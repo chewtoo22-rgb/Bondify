@@ -49,10 +49,6 @@ class BondifyVpnService : VpnService() {
         private const val NOTIFICATION_CHANNEL_ID = "bondify_tunnel"
         private const val NOTIFICATION_ID = 1
 
-        // How long to wait for both Wi-Fi and cellular to report available before starting
-        // with whatever showed up -- long enough for a cold radio to associate, short enough
-        // not to stall a single-uplink device (e.g. a Wi-Fi-only tablet) waiting on a
-        // cellular network that will never come.
         private const val PATH_WAIT_MS = 4000L
 
         @Volatile
@@ -130,11 +126,6 @@ class BondifyVpnService : VpnService() {
                     error("no uplink (Wi-Fi or cellular) became available within ${PATH_WAIT_MS}ms")
                 }
 
-                // Handshake first, TUN interface second: the relay assigns this device's
-                // tunnel IP dynamically from its pool (see PROTOCOL.md's cfg_push), so unlike
-                // a static WireGuard-style config, the real address isn't known until the
-                // handshake completes -- and VpnService.Builder can't be reconfigured after
-                // establish(), so it must be built with the *real* value, not a placeholder.
                 val handshaked = builder.handshake()
                 if (stopping) {
                     handshaked.close()
@@ -144,7 +135,7 @@ class BondifyVpnService : VpnService() {
                     Log.w(TAG, "some paths failed to join: ${handshaked.pathErrors}")
                 }
 
-                val handshakeMtu = handshaked.getMTU() // Kotlin's Java-property synthesis doesn't kick in for all-caps getMTU()
+                val handshakeMtu = handshaked.getMTU()
                 val mtu = if (handshakeMtu > 0) handshakeMtu.toInt() else 1280
                 val vpnBuilder = Builder()
                     .setSession(getString(R.string.app_name))
@@ -201,21 +192,6 @@ class BondifyVpnService : VpnService() {
         val networks: List<Network>,
     )
 
-    /**
-     * Requests Wi-Fi and cellular networks, and for each that becomes available within
-     * [PATH_WAIT_MS], dials a UDP socket to the relay on it, binds it to that network,
-     * protects it from the VPN's own capture, and hands its fd to [builder].
-     *
-     * The callbacks intentionally remain registered after this function returns so Android
-     * keeps the requested physical networks alive for the rest of the connection, not just
-     * this initial gathering window. The `accepting` gate governs which of two paths a given
-     * callback event takes: while gathering, `onAvailable` mutates [builder] (pre-handshake,
-     * one-shot); once handshake has started, the same events instead call [tunnel]'s own
-     * runtime [Tunnel.addPathFD]/[Tunnel.dropPathLabel] (core/bond's `AddPath`/`DropPath` --
-     * see mobile/mobile.go), so a physical uplink lost mid-session (Wi-Fi walking out of
-     * range, a cellular handover, the device coming back from airplane mode) rejoins the
-     * bond instead of being gone for the rest of the session.
-     */
     private fun acquirePaths(builder: TunnelBuilder, endpoint: RelayEndpoint): AcquiredPaths {
         var added = 0
         val lock = Object()
@@ -235,7 +211,7 @@ class BondifyVpnService : VpnService() {
                 val pfd = ParcelFileDescriptor.fromDatagramSocket(socket)
                 detachedFd = pfd.detachFd()
                 val fd = checkNotNull(detachedFd)
-                detachedFd = null // the caller's AddPathFD consumes the descriptor even on error
+                detachedFd = null
                 return fd.toLong()
             } finally {
                 socket.close()
@@ -243,17 +219,13 @@ class BondifyVpnService : VpnService() {
             }
         }
 
-        // Adds network as label to the not-yet-handshaked builder. Returns true if it
-        // handled the event (whether or not the add itself succeeded); false means the
-        // gathering window had already closed and the caller should try a runtime add
-        // instead.
         fun tryAddDuringGathering(network: Network, label: String): Boolean {
             synchronized(lock) {
                 if (!accepting) {
                     return false
                 }
                 if (stopping || label in addedLabels) {
-                    return true // handled: nothing to do
+                    return true
                 }
                 try {
                     builder.addPathFD(dialSocketFd(network, label), label)
@@ -269,8 +241,7 @@ class BondifyVpnService : VpnService() {
         }
 
         fun tryRuntimeAdd(network: Network, label: String) {
-            val t = tunnel ?: return // handshake not finished yet; drop this event, same as
-            // any other narrow-window race this class already tolerates (see class doc).
+            val t = tunnel ?: return
             try {
                 t.addPathFD(dialSocketFd(network, label), label)
                 Log.i(TAG, "runtime-added path: $label")
@@ -317,9 +288,6 @@ class BondifyVpnService : VpnService() {
 
         Thread.sleep(PATH_WAIT_MS)
         return synchronized(lock) {
-            // If a callback is already adding a path, acquiring this lock waits for it to
-            // finish. No builder mutation can cross this boundary into Handshake(); every
-            // onAvailable after this point takes the tryRuntimeAdd branch instead.
             accepting = false
             AcquiredPaths(added, networks.toList())
         }
@@ -362,8 +330,6 @@ class BondifyVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        // The system calls this when the user revokes VPN permission from Settings directly
-        // (not through our own UI) -- must still tear down cleanly, not just die.
         disconnect()
         super.onRevoke()
     }
@@ -416,21 +382,18 @@ internal fun parseRelayEndpoint(addr: String): RelayEndpoint {
     require(uri.path.isNullOrEmpty() && uri.query == null && uri.fragment == null) {
         "relay address cannot contain a path, query, or fragment"
     }
-    // java.net.URI retains square brackets around IPv6 literals on some Android/JDK
-    // versions; InetSocketAddress expects the address itself.
     return RelayEndpoint(uri.host.removePrefix("[").removeSuffix("]"), uri.port)
 }
 
-/** Tiny local-only preference wrapper -- see MainActivity for where the client key is generated. */
+/** Preference names plus Keystore-backed access to the client identity. */
 object Prefs {
     const val NAME = "bondify_prefs"
     const val KEY_RELAY_ADDR = "relay_addr"
     const val KEY_RELAY_PUBKEY = "relay_pubkey"
-    private const val KEY_CLIENT_KEY = "client_key_b64"
 
-    fun clientKey(prefs: SharedPreferences): String? = prefs.getString(KEY_CLIENT_KEY, null)
+    fun clientKey(prefs: SharedPreferences): String? = ClientKeyStore.getOrMigrate(prefs)
 
     fun setClientKey(prefs: SharedPreferences, value: String) {
-        prefs.edit().putString(KEY_CLIENT_KEY, value).apply()
+        ClientKeyStore.store(prefs, value)
     }
 }
