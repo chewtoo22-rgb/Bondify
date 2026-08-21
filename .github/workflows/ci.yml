@@ -140,3 +140,5 @@ jobs:
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase7.sh
       - name: Run chaos gate (heterogeneous MTU + repeated path flaps)
         run: sudo -E env "PATH=$PATH" bash testbed/run_chaos.sh
+      - name: Run chaos gate (silent PMTU black hole + changing loss/jitter/RTT)
+        run: sudo -E env "PATH=$PATH" bash testbed/run_chaos_pmtu.sh
