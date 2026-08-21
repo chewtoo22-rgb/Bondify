@@ -135,7 +135,21 @@ jobs:
       - name: Run phase 3 gates (HoL gate, Tier 4 vs Tier 1 hetero/homo benchmark matrix)
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase3.sh
       - name: Run phase 4 gates (real loss, FEC recovery, path-death survivability)
-        run: sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh
+        shell: bash
+        run: |
+          set +e
+          sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh 2>&1 | tee /tmp/bondify-phase4.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          if grep -Eq 'iperf_json_finish: pthread_mutex_lock|iperf_errexit: pthread_mutex_unlock' /tmp/bondify-phase4.log; then
+            echo "Detected known iperf3 pthread mutex crash; retrying Phase 4 once."
+            sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh
+          else
+            exit "$status"
+          fi
       - name: Run phase 7 gate (loaded BULK download, SSH-shaped RTT within 25%)
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase7.sh
       - name: Run chaos gate (heterogeneous MTU + repeated path flaps)
