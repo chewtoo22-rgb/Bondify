@@ -1,0 +1,26 @@
+name: Soak Churn
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  soak-churn:
+    name: 90s repeated path-churn soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Install network test tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 iptables iperf3
+      - name: Run long-duration churn soak
+        run: sudo -E env "PATH=$PATH" bash testbed/run_soak_churn.sh
