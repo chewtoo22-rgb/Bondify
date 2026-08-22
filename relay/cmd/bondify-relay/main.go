@@ -147,12 +147,11 @@ func main() {
 	defer stop()
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- r.ServeUDP() }()
+	go func() { errCh <- r.ServeUDPManaged(*sessionIdle) }()
 	go func() { errCh <- r.ServeTUN() }()
 	go r.ServeManagedReorder(ctx)
 	go r.FECMaintenanceLoop(ctx)
 	if *sessionIdle > 0 {
-		go r.RunSessionReaper(ctx, *sessionIdle)
 		log.Printf("relay: idle session reclamation enabled (%s)", sessionIdle.Round(time.Second))
 	} else {
 		log.Printf("relay: idle session reclamation disabled")
