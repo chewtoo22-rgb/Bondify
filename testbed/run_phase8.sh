@@ -99,15 +99,33 @@ ip netns exec bondify-client iperf3 -c 10.77.0.1 -p 5800 -t 12 -J \
 FLOW_PID=$!
 sleep 4
 kill -USR1 "$CLIENT_PID"
+
+# Signal delivery and log flushing are asynchronous on loaded GitHub runners. Poll for the
+# actual state transition before tearing down the proxy so this gate tests revoke handling,
+# not incidental process/log timing. A late or missing revoke remains a hard failure.
+REVOKED=0
+for _ in $(seq 1 50); do
+	if grep -q "peer revoked, paths=1" /tmp/bondify-phase8-client.log; then
+		REVOKED=1
+		break
+	fi
+	if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+		break
+	fi
+	sleep 0.1
+done
+if [ "$REVOKED" -ne 1 ]; then
+	fail "client did not confirm local path removal within 5s of explicit revoke"
+	cat /tmp/bondify-phase8-client.log || true
+fi
+
 kill -TERM "$PROXY_PID" 2>/dev/null || true
 
 if timeout 20 tail --pid="$FLOW_PID" -f /dev/null; then
 	if wait "$FLOW_PID"; then
-		if grep -q "peer revoked, paths=1" /tmp/bondify-phase8-client.log; then
+		if [ "$REVOKED" -eq 1 ]; then
 			POST_MBPS=$(python3 -c "import json;d=json.load(open('/tmp/bondify-phase8-revoke.json'));print(d['end']['sum_received']['bits_per_second']/1e6)")
 			log "PASS gate B: flow survived explicit revoke; whole-run goodput ${POST_MBPS} Mbps"
-		else
-			fail "client never confirmed immediate local path removal"
 		fi
 	else
 		fail "iperf3 flow failed after peer revoke"
