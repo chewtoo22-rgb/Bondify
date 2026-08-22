@@ -3,6 +3,7 @@ package bond
 import (
 	"context"
 	"log"
+	"net"
 	"time"
 
 	"github.com/chewtoo22-rgb/bondify/core/sched"
@@ -16,14 +17,57 @@ const defaultSessionIdleTimeout = 2 * time.Minute
 // this; a session must also have no non-DEAD path before it can be reaped.
 const DefaultSessionIdleTimeout = defaultSessionIdleTimeout
 
-// RunSessionReaper reclaims sessions that have been fully dead and inactive for idleTimeout.
-// A non-positive timeout disables reclamation. This loop is deliberately independent from
-// path liveness so tests can exercise the policy deterministically and operators can choose a
-// conservative lease lifetime without changing path failover behavior.
-func (r *Relay) RunSessionReaper(ctx context.Context, idleTimeout time.Duration) {
-	if r == nil || idleTimeout <= 0 {
-		return
+// ServeUDPManaged is ServeUDP plus deterministic idle-session reclamation. Reaping happens
+// on this exact goroutine, between UDP packets, rather than in a background goroutine. That
+// serialization is security-critical: handleHandshakeInit intentionally drops r.mu while it
+// performs the Noise response and constructs the replacement session. A concurrent reaper
+// could otherwise observe the old session, delete it, and release its tunnel IP after a
+// same-key reconnect had already decided to reuse that lease. Keeping both operations on the
+// UDP dispatcher makes the existing reconnect semantics and lease reclamation atomic at the
+// protocol-operation level without widening r.mu across expensive crypto work.
+//
+// A non-positive timeout disables reclamation and falls back to the historical ServeUDP
+// loop. With reclamation enabled, a read deadline wakes an otherwise-idle relay at most every
+// maintenance interval so abandoned sessions are still collected even when no new packets
+// arrive.
+func (r *Relay) ServeUDPManaged(idleTimeout time.Duration) error {
+	if r == nil {
+		return nil
 	}
+	if idleTimeout <= 0 {
+		return r.ServeUDP()
+	}
+
+	interval := sessionReapInterval(idleTimeout)
+	zeroPathSince := make(map[*relaySession]time.Time)
+	nextReap := time.Now().Add(interval)
+	buf := make([]byte, 65536)
+
+	for {
+		if err := r.conn.SetReadDeadline(nextReap); err != nil {
+			return err
+		}
+		n, src, err := r.conn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				now := time.Now()
+				r.reapIdleSessionsTracked(now, idleTimeout, zeroPathSince)
+				nextReap = now.Add(interval)
+				continue
+			}
+			return err
+		}
+
+		r.handleUDP(buf[:n], src)
+		now := time.Now()
+		if !now.Before(nextReap) {
+			r.reapIdleSessionsTracked(now, idleTimeout, zeroPathSince)
+			nextReap = now.Add(interval)
+		}
+	}
+}
+
+func sessionReapInterval(idleTimeout time.Duration) time.Duration {
 	interval := idleTimeout / 4
 	if interval < time.Second {
 		interval = time.Second
@@ -31,22 +75,12 @@ func (r *Relay) RunSessionReaper(ctx context.Context, idleTimeout time.Duration)
 	if interval > 30*time.Second {
 		interval = 30 * time.Second
 	}
-	zeroPathSince := make(map[*relaySession]time.Time)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			r.reapIdleSessionsTracked(now, idleTimeout, zeroPathSince)
-		}
-	}
+	return interval
 }
 
 // reapIdleSessions performs one deterministic reclamation pass and returns the number of
 // sessions retired. Tests inject now so no sleeps are required. Sessions that currently have
-// zero paths are intentionally not retired by this stateless helper; RunSessionReaper gives
+// zero paths are intentionally not retired by this stateless helper; ServeUDPManaged gives
 // that state its own observed idle window via reapIdleSessionsTracked.
 func (r *Relay) reapIdleSessions(now time.Time, idleTimeout time.Duration) int {
 	return r.reapIdleSessionsTracked(now, idleTimeout, nil)
@@ -65,11 +99,9 @@ func (r *Relay) reapIdleSessionsTracked(now time.Time, idleTimeout time.Duration
 	}
 	r.mu.RUnlock()
 
-	if zeroPathSince != nil {
-		for s := range zeroPathSince {
-			if _, ok := current[s]; !ok {
-				delete(zeroPathSince, s)
-			}
+	for s := range zeroPathSince {
+		if _, ok := current[s]; !ok {
+			delete(zeroPathSince, s)
 		}
 	}
 
@@ -89,18 +121,14 @@ func (r *Relay) reapIdleSessionsTracked(now time.Time, idleTimeout time.Duration
 				continue
 			}
 		} else {
-			if zeroPathSince != nil {
-				delete(zeroPathSince, s)
-			}
+			delete(zeroPathSince, s)
 			if !sessionReapEligibleWithPaths(s, paths, now, idleTimeout) {
 				continue
 			}
 		}
 		if r.removeSession(s) {
 			reaped++
-			if zeroPathSince != nil {
-				delete(zeroPathSince, s)
-			}
+			delete(zeroPathSince, s)
 			log.Printf("bond: session %08x expired after %s idle; released tunnel ip %s", s.sessionIndex, idleTimeout, s.tunnelIP)
 		}
 	}
@@ -141,7 +169,9 @@ func sessionReapEligibleWithPaths(s *relaySession, paths []*Path, now time.Time,
 
 // removeSession atomically detaches s from every relay lookup table and returns its lease
 // exactly once. Pointer equality prevents an old/replaced session from deleting a newer
-// reconnect that reused the same session index or tunnel IP.
+// reconnect that reused the same session index or tunnel IP. Production reclamation calls
+// this only from ServeUDPManaged, serial with handleHandshakeInit, so a reconnect cannot be
+// midway through deciding to reuse s while its lease is returned to the pool.
 func (r *Relay) removeSession(s *relaySession) bool {
 	if r == nil || s == nil {
 		return false
