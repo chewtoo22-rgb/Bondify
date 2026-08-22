@@ -1,0 +1,125 @@
+name: Wire Handshake Limiter
+
+on:
+  push:
+    branches: [security/handshake-rate-limit]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: security/handshake-rate-limit
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Wire limiter before Noise responder work
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('core/bond/relay.go')
+          s = p.read_text()
+
+          old = '''\tbyClientKey  map[[crypto.KeyLen]byte]*relaySession\n\tpacingCtx    context.Context\n\tpacingCancel context.CancelFunc\n\tcloseOnce    sync.Once\n'''
+          new = '''\tbyClientKey      map[[crypto.KeyLen]byte]*relaySession\n\thandshakeLimiter *handshakeLimiter\n\tnewResponder     func(crypto.Keypair) (*crypto.Responder, error)\n\tpacingCtx         context.Context\n\tpacingCancel      context.CancelFunc\n\tcloseOnce         sync.Once\n'''
+          if old not in s:
+              raise SystemExit('Relay struct anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''\t\tbyClientKey:  make(map[[crypto.KeyLen]byte]*relaySession),\n\t\tpacingCtx:    pacingCtx,\n\t\tpacingCancel: pacingCancel,\n'''
+          new = '''\t\tbyClientKey:      make(map[[crypto.KeyLen]byte]*relaySession),\n\t\thandshakeLimiter: newHandshakeLimiter(defaultHandshakeRate, defaultHandshakeBurst, defaultHandshakeMaxSources),\n\t\tnewResponder:     crypto.NewResponder,\n\t\tpacingCtx:        pacingCtx,\n\t\tpacingCancel:     pacingCancel,\n'''
+          if old not in s:
+              raise SystemExit('Relay constructor anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {\n\tresponder, err := crypto.NewResponder(r.cfg.RelayKey)\n'''
+          new = '''func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {\n\t// Reject excess unauthenticated handshake work before allocating a Noise responder.\n\t// The limiter combines a per-source bucket with a global bucket, so both a single\n\t// abusive address and source-rotation/spoofing attacks are bounded.\n\tif src == nil || r.handshakeLimiter == nil || !r.handshakeLimiter.allow(src.IP, time.Now()) {\n\t\treturn\n\t}\n\tresponderFactory := r.newResponder\n\tif responderFactory == nil {\n\t\tresponderFactory = crypto.NewResponder\n\t}\n\tresponder, err := responderFactory(r.cfg.RelayKey)\n'''
+          if old not in s:
+              raise SystemExit('handleHandshakeInit anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+          cat > core/bond/handshake_limiter_integration_test.go <<'EOF'
+          package bond
+
+          import (
+          	"errors"
+          	"net"
+          	"testing"
+          	"time"
+
+          	"github.com/chewtoo22-rgb/bondify/core/crypto"
+          )
+
+          func TestHandshakeLimiterRejectsBeforeResponderWork(t *testing.T) {
+          	called := 0
+          	r := &Relay{
+          		handshakeLimiter: newHandshakeLimiterWithGlobal(100, 1, 8, 100, 100),
+          		newResponder: func(crypto.Keypair) (*crypto.Responder, error) {
+          			called++
+          			return nil, errors.New("sentinel responder")
+          		},
+          	}
+          	src := &net.UDPAddr{IP: net.ParseIP("203.0.113.77"), Port: 4242}
+
+          	r.handleHandshakeInit(nil, src)
+          	if called != 1 {
+          		t.Fatalf("first allowed handshake created %d responders, want 1", called)
+          	}
+
+          	r.handleHandshakeInit(nil, src)
+          	if called != 1 {
+          		t.Fatalf("rate-limited handshake reached responder factory; calls=%d, want 1", called)
+          	}
+          }
+
+          func TestHandshakeLimiterRejectsNilSourceBeforeResponderWork(t *testing.T) {
+          	called := 0
+          	r := &Relay{
+          		handshakeLimiter: newHandshakeLimiterWithGlobal(100, 1, 8, 100, 100),
+          		newResponder: func(crypto.Keypair) (*crypto.Responder, error) {
+          			called++
+          			return nil, errors.New("sentinel responder")
+          		},
+          	}
+          	r.handleHandshakeInit(nil, nil)
+          	if called != 0 {
+          		t.Fatalf("nil source reached responder factory; calls=%d", called)
+          	}
+          	_ = time.Now() // keep time imported if test compiler folds future changes
+          }
+          EOF
+
+          # Remove the unnecessary time import/sentinel line from the generated test.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('core/bond/handshake_limiter_integration_test.go')
+          s = p.read_text().replace('\n\t"time"\n', '\n').replace('\n\t_ = time.Now() // keep time imported if test compiler folds future changes\n', '\n')
+          p.write_text(s)
+          PY
+
+          gofmt -w core/bond/relay.go core/bond/handshake_limiter*.go
+          go test ./core/bond -run 'HandshakeLimiter' -count=1
+          go test ./core/bond -race -count=1
+
+      - name: Commit completed wiring and remove patcher
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/wire-handshake-limiter.yml
+          git add -- core/bond/relay.go core/bond/handshake_limiter.go core/bond/handshake_limiter_test.go core/bond/handshake_limiter_integration_test.go
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'security: enforce handshake limits before Noise work'
+          git push origin HEAD:security/handshake-rate-limit
