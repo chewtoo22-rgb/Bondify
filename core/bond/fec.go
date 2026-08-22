@@ -144,13 +144,20 @@ func (b *fecGenBuffer) getOrCreateLocked(genID uint16) *fecGeneration {
 }
 
 // HandleData records one FEC-protected DATA packet's full inner plaintext for possible
-// future reconstruction of a sibling shard in the same generation. Cheap and a no-op on
-// memory pressure over time thanks to GC; call for every DATA packet carrying
-// proto.FlagFECProtected (skip entirely for non-FEC traffic -- no bookkeeping cost).
+// future reconstruction of a sibling shard in the same generation. DATA genIndex is bounded
+// by the sender's protocol constant fec.K before any allocation/copy: a peer can authenticate
+// arbitrary inner headers, but it cannot legitimately produce index K or larger because a
+// generation closes as soon as K data shards are recorded.
 func (b *fecGenBuffer) HandleData(genID uint16, genIndex int, innerPlaintext []byte) {
+	if genIndex < 0 || genIndex >= fec.K {
+		return
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	g := b.getOrCreateLocked(genID)
+	if g.n > 0 && genIndex >= g.n {
+		return
+	}
 	g.data[genIndex] = append([]byte(nil), innerPlaintext...)
 }
 
@@ -158,16 +165,15 @@ func (b *fecGenBuffer) HandleData(genID uint16, genIndex int, innerPlaintext []b
 // present (data+parity) and is missing at least one data shard, attempts reconstruction.
 // Returns a map of genIndex -> recovered inner plaintext for every data shard that was
 // missing and could be recovered (empty if nothing was missing, or reconstruction wasn't
-// yet possible -- both are ordinary, expected outcomes, not errors). Rejects malformed
-// geometry outright: n/m/w must be positive and parityIndex must be in [0, m). Without this,
-// a wire-supplied parityIndex outside that range (e.g. negative, from a peer whose GenIndex
-// is less than N) writes into shards[n+parityIndex], landing inside the *data* index range
-// and getting marked present -- Reconstruct then silently computes wrong payloads from a
-// corrupted shard set instead of failing. Also pins n/m/w to the first FEC packet seen for
-// this generation; a later packet claiming different geometry (a stale/reordered send, or a
-// buggy peer) is dropped rather than allowed to redefine it mid-flight.
+// yet possible -- both are ordinary, expected outcomes, not errors).
+//
+// All wire-supplied geometry is constrained to values Bondify's own sender can emit before
+// it is retained or passed to Reed-Solomon. That is a resource-safety boundary as well as a
+// correctness check: authenticated peers are still untrusted inputs, and allowing n/m far
+// above fec.K/MaxRedundancy can turn one small control stream into disproportionate decoder
+// allocations/CPU. Parity shard width must also exactly match W before it is copied.
 func (b *fecGenBuffer) HandleFEC(genID uint16, n, m, w, parityIndex int, shard []byte) map[int][]byte {
-	if n <= 0 || m <= 0 || w <= 0 || parityIndex < 0 || parityIndex >= m {
+	if n <= 0 || n > fec.K || m <= 0 || m > fec.RedundancyFor(1, n) || w <= 0 || len(shard) != w || parityIndex < 0 || parityIndex >= m {
 		return nil
 	}
 	b.mu.Lock()
@@ -175,6 +181,14 @@ func (b *fecGenBuffer) HandleFEC(genID uint16, n, m, w, parityIndex int, shard [
 	g := b.getOrCreateLocked(genID)
 	if g.n == 0 {
 		g.n, g.m, g.w = n, m, w
+		// DATA can arrive before the parity packet that tells us N. Keep the sender-side
+		// NextSlot/Flush race tolerance for indices < fec.K, but once N is known discard
+		// entries outside this generation's actual data range.
+		for i := range g.data {
+			if i >= g.n {
+				delete(g.data, i)
+			}
+		}
 	} else if g.n != n || g.m != m || g.w != w {
 		return nil // geometry mismatch with what this generation was first observed as
 	}
@@ -190,7 +204,10 @@ func (b *fecGenBuffer) HandleFEC(genID uint16, n, m, w, parityIndex int, shard [
 		}
 	}
 	if haveData >= g.n {
-		return nil // nothing missing
+		// No future parity can add value once every data shard is already present. Drop the
+		// generation immediately instead of retaining it until the periodic one-second GC.
+		delete(b.gens, genID)
+		return nil
 	}
 	if haveData+len(g.parity) < g.n {
 		return nil // not enough shards yet to even attempt reconstruction
@@ -218,6 +235,10 @@ func (b *fecGenBuffer) HandleFEC(genID uint16, n, m, w, parityIndex int, shard [
 	for idx, payload := range recovered {
 		g.data[idx] = payload
 	}
+	// Successful Reed-Solomon reconstruction fills every missing data slot for this
+	// generation, so retaining its maps until GC only increases the memory footprint under
+	// sustained loss. The returned slices remain valid after removing the map entry.
+	delete(b.gens, genID)
 	return recovered
 }
 
@@ -237,7 +258,7 @@ func (b *fecGenBuffer) GC(maxAge time.Duration) {
 
 // unmarshalRecovered parses a reconstructed inner plaintext (header + payload, exactly
 // what fecSender protected) back into its InnerDataHeader and payload, so the caller can
-// push the payload into its reorder buffer under the recovered header's GSN. Reports false
+// push the payload into the reorder buffer under the recovered header's GSN. Reports false
 // if the reconstructed bytes don't parse as a valid inner header -- reconstruction succeeds
 // at the erasure-coding level but the result is still just bytes, so this stays a normal,
 // handled outcome rather than a panic-worthy invariant violation.
