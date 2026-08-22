@@ -104,6 +104,9 @@ func DialClient(ctx context.Context, cfg ClientConfig, dev tun.Device, mtu int) 
 // (returned here in HandshakeRespPayload.TunnelIP) is already known; see AttachTUN's doc
 // comment.
 func DialHandshake(ctx context.Context, cfg ClientConfig) (*ClientTunnel, HandshakeRespPayload, error) {
+	if len(cfg.Paths) > 1<<8 {
+		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: too many paths: %d (maximum 256)", len(cfg.Paths))
+	}
 	if err := cfg.BulkBudget.Validate(); err != nil {
 		return nil, HandshakeRespPayload{}, fmt.Errorf("bond: bulk budget: %w", err)
 	}
