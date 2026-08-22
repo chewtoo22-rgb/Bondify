@@ -43,7 +43,23 @@ func openControl(sess *crypto.Session, oh proto.OuterHeader, pathID uint8, ciphe
 	adBuf[0] = byte(oh.Type)
 	adBuf[1] = oh.Version
 	be32(adBuf[4:8], oh.SessionIndex)
-	return sess.Open(pathID, ciphertext, adBuf, oh.Nonce)
+	payload, err := sess.Open(pathID, ciphertext, adBuf, oh.Nonce)
+	if err != nil {
+		return nil, err
+	}
+	// PATH_ADD is authenticated under the path ID encoded into the AEAD nonce. The
+	// decrypted CBOR must name that same path; otherwise an authenticated client could
+	// bind one cryptographic identity while registering another control-plane identity.
+	if oh.Type == proto.TypePathAdd {
+		var req PathAddPayload
+		if err := unmarshalCBOR(payload, &req); err != nil {
+			return nil, err
+		}
+		if req.PathID != pathID {
+			return nil, fmt.Errorf("bond: path add payload id %d does not match authenticated path id %d", req.PathID, pathID)
+		}
+	}
+	return payload, nil
 }
 
 // ProbePayload measures RTT and loss for one path (PROTOCOL.md §6). SentPSN is the path's
