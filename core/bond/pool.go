@@ -7,16 +7,17 @@ import (
 	"sync"
 )
 
-// IPPool hands out sequential IPv4 addresses from a CIDR, reserving the first address
-// (the network's .1) as the relay's own gateway address. Not a general-purpose IPAM: no
-// fragmentation-aware reuse strategy beyond a simple free list, which is all a relay
-// mapping client static keys to tunnel IPs needs.
+// IPPool hands out sequential IPv4 addresses from a CIDR, reserving the first usable
+// address (the network's .1) as the relay's own gateway and never allocating the subnet's
+// network or broadcast address. Not a general-purpose IPAM: released addresses are reused
+// from a simple free list, which is sufficient for the relay's client-key-to-tunnel-IP map.
 type IPPool struct {
-	mu       sync.Mutex
-	network  *net.IPNet
-	next     uint32
-	end      uint32
-	released []uint32
+	mu        sync.Mutex
+	network   *net.IPNet
+	next      uint32
+	end       uint32
+	released  []uint32
+	allocated map[uint32]struct{}
 }
 
 func NewIPPool(cidr string) (*IPPool, error) {
@@ -31,13 +32,15 @@ func NewIPPool(cidr string) (*IPPool, error) {
 	base := binary.BigEndian.Uint32(network.IP.To4())
 	ones, bits := network.Mask.Size()
 	size := uint32(1) << uint(bits-ones)
+	// We reserve network, gateway, and broadcast, leaving at least one client address.
 	if size < 4 {
 		return nil, fmt.Errorf("bond: pool cidr %q too small", cidr)
 	}
 	return &IPPool{
-		network: network,
-		next:    base + 2, // base+1 reserved for the relay gateway itself
-		end:     base + size - 1,
+		network:   network,
+		next:      base + 2,        // base+1 reserved for the relay gateway itself
+		end:       base + size - 2, // base+size-1 is the IPv4 broadcast address
+		allocated: make(map[uint32]struct{}),
 	}, nil
 }
 
@@ -61,6 +64,7 @@ func (p *IPPool) Allocate() (net.IP, error) {
 	if n := len(p.released); n > 0 {
 		v := p.released[n-1]
 		p.released = p.released[:n-1]
+		p.allocated[v] = struct{}{}
 		return uint32ToIP(v), nil
 	}
 	if p.next > p.end {
@@ -68,18 +72,26 @@ func (p *IPPool) Allocate() (net.IP, error) {
 	}
 	v := p.next
 	p.next++
+	p.allocated[v] = struct{}{}
 	return uint32ToIP(v), nil
 }
 
-// Release returns an address to the pool.
+// Release returns an address previously handed out by Allocate to the pool. Unknown,
+// out-of-range, gateway/broadcast, and duplicate releases are ignored so a cleanup bug
+// cannot poison the free list and cause the same tunnel IP to be leased twice.
 func (p *IPPool) Release(ip net.IP) {
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return
 	}
+	v := binary.BigEndian.Uint32(ip4)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.released = append(p.released, binary.BigEndian.Uint32(ip4))
+	if _, ok := p.allocated[v]; !ok {
+		return
+	}
+	delete(p.allocated, v)
+	p.released = append(p.released, v)
 }
 
 func uint32ToIP(v uint32) net.IP {
