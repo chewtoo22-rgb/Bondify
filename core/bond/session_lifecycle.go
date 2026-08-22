@@ -31,6 +31,7 @@ func (r *Relay) RunSessionReaper(ctx context.Context, idleTimeout time.Duration)
 	if interval > 30*time.Second {
 		interval = 30 * time.Second
 	}
+	zeroPathSince := make(map[*relaySession]time.Time)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -38,31 +39,68 @@ func (r *Relay) RunSessionReaper(ctx context.Context, idleTimeout time.Duration)
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			r.reapIdleSessions(now, idleTimeout)
+			r.reapIdleSessionsTracked(now, idleTimeout, zeroPathSince)
 		}
 	}
 }
 
 // reapIdleSessions performs one deterministic reclamation pass and returns the number of
-// sessions retired. Tests inject now so no sleeps are required.
+// sessions retired. Tests inject now so no sleeps are required. Sessions that currently have
+// zero paths are intentionally not retired by this stateless helper; RunSessionReaper gives
+// that state its own observed idle window via reapIdleSessionsTracked.
 func (r *Relay) reapIdleSessions(now time.Time, idleTimeout time.Duration) int {
+	return r.reapIdleSessionsTracked(now, idleTimeout, nil)
+}
+
+func (r *Relay) reapIdleSessionsTracked(now time.Time, idleTimeout time.Duration, zeroPathSince map[*relaySession]time.Time) int {
 	if r == nil || idleTimeout <= 0 {
 		return 0
 	}
 	r.mu.RLock()
 	sessions := make([]*relaySession, 0, len(r.byIndex))
+	current := make(map[*relaySession]struct{}, len(r.byIndex))
 	for _, s := range r.byIndex {
 		sessions = append(sessions, s)
+		current[s] = struct{}{}
 	}
 	r.mu.RUnlock()
 
+	if zeroPathSince != nil {
+		for s := range zeroPathSince {
+			if _, ok := current[s]; !ok {
+				delete(zeroPathSince, s)
+			}
+		}
+	}
+
 	reaped := 0
 	for _, s := range sessions {
-		if !sessionReapEligible(s, now, idleTimeout) {
-			continue
+		paths := s.pathSlice()
+		if len(paths) == 0 {
+			if zeroPathSince == nil {
+				continue
+			}
+			since, ok := zeroPathSince[s]
+			if !ok {
+				zeroPathSince[s] = now
+				continue
+			}
+			if now.Sub(since) < idleTimeout {
+				continue
+			}
+		} else {
+			if zeroPathSince != nil {
+				delete(zeroPathSince, s)
+			}
+			if !sessionReapEligibleWithPaths(s, paths, now, idleTimeout) {
+				continue
+			}
 		}
 		if r.removeSession(s) {
 			reaped++
+			if zeroPathSince != nil {
+				delete(zeroPathSince, s)
+			}
 			log.Printf("bond: session %08x expired after %s idle; released tunnel ip %s", s.sessionIndex, idleTimeout, s.tunnelIP)
 		}
 	}
@@ -70,11 +108,21 @@ func (r *Relay) reapIdleSessions(now time.Time, idleTimeout time.Duration) int {
 }
 
 func sessionReapEligible(s *relaySession, now time.Time, idleTimeout time.Duration) bool {
+	if s == nil {
+		return false
+	}
+	paths := s.pathSlice()
+	if len(paths) == 0 {
+		return false
+	}
+	return sessionReapEligibleWithPaths(s, paths, now, idleTimeout)
+}
+
+func sessionReapEligibleWithPaths(s *relaySession, paths []*Path, now time.Time, idleTimeout time.Duration) bool {
 	if s == nil || idleTimeout <= 0 {
 		return false
 	}
 	latest := s.startedAt
-	paths := s.pathSlice()
 	for _, p := range paths {
 		// Never reap an ACTIVE/JOINING/DEGRADED path even if its timestamp looks stale.
 		// The ordinary liveness loop owns that transition to DEAD first.
@@ -88,8 +136,7 @@ func sessionReapEligible(s *relaySession, now time.Time, idleTimeout time.Durati
 			}
 		}
 	}
-	idle := now.Sub(latest)
-	return idle >= idleTimeout
+	return now.Sub(latest) >= idleTimeout
 }
 
 // removeSession atomically detaches s from every relay lookup table and returns its lease
