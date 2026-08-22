@@ -139,14 +139,21 @@ func (r *Relay) ServeManagedReorder(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		current := make(map[*relaySession]struct{})
 		r.mu.RLock()
 		for _, s := range r.byIndex {
+			current[s] = struct{}{}
 			if !seen[s] {
 				seen[s] = true
 				go r.drainManagedSessionReorder(ctx, s)
 			}
 		}
 		r.mu.RUnlock()
+		for s := range seen {
+			if _, ok := current[s]; !ok {
+				delete(seen, s)
+			}
+		}
 	}
 }
 
