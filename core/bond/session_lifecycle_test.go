@@ -110,6 +110,29 @@ func TestReapIdleSessionHonorsMostRecentAuthenticatedPathActivity(t *testing.T) 
 	}
 }
 
+func TestZeroPathSessionGetsFreshObservedIdleWindow(t *testing.T) {
+	now := time.Now()
+	idle := time.Minute
+	r := makeLifecycleTestRelay(t, "10.77.0.0/29")
+	s := addLifecycleTestSession(t, r, 12, 4, now.Add(-10*idle), sched.StateDead, now.Add(-10*idle))
+	s.paths = map[uint8]*Path{}
+	s.schedPathView.Store([]sched.Path(nil))
+	zeroPathSince := make(map[*relaySession]time.Time)
+
+	if got := r.reapIdleSessionsTracked(now, idle, zeroPathSince); got != 0 {
+		t.Fatalf("first zero-path observation reaped=%d, want 0", got)
+	}
+	if since, ok := zeroPathSince[s]; !ok || !since.Equal(now) {
+		t.Fatalf("zero-path idle window not initialized at observation time: ok=%v since=%v", ok, since)
+	}
+	if got := r.reapIdleSessionsTracked(now.Add(idle-time.Second), idle, zeroPathSince); got != 0 {
+		t.Fatalf("zero-path session reaped before grace elapsed: %d", got)
+	}
+	if got := r.reapIdleSessionsTracked(now.Add(idle), idle, zeroPathSince); got != 1 {
+		t.Fatalf("zero-path session reaped=%d after full grace, want 1", got)
+	}
+}
+
 func TestSessionChurnDoesNotPermanentlyExhaustPool(t *testing.T) {
 	now := time.Now()
 	idle := time.Minute
