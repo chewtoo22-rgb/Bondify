@@ -213,13 +213,15 @@ type Relay struct {
 	dev  tun.Device
 	pool *IPPool
 
-	mu           sync.RWMutex
-	byIndex      map[uint32]*relaySession
-	byTunnelIP   map[string]*relaySession
-	byClientKey  map[[crypto.KeyLen]byte]*relaySession
-	pacingCtx    context.Context
-	pacingCancel context.CancelFunc
-	closeOnce    sync.Once
+	mu               sync.RWMutex
+	byIndex          map[uint32]*relaySession
+	byTunnelIP       map[string]*relaySession
+	byClientKey      map[[crypto.KeyLen]byte]*relaySession
+	handshakeLimiter *handshakeLimiter
+	newResponder     func(crypto.Keypair) (*crypto.Responder, error)
+	pacingCtx        context.Context
+	pacingCancel     context.CancelFunc
+	closeOnce        sync.Once
 
 	Stats Stats
 }
@@ -251,15 +253,17 @@ func NewRelay(cfg RelayConfig, dev tun.Device) (*Relay, error) {
 	}
 	pacingCtx, pacingCancel := context.WithCancel(context.Background())
 	r := &Relay{
-		cfg:          cfg,
-		conn:         conn,
-		dev:          dev,
-		pool:         pool,
-		byIndex:      make(map[uint32]*relaySession),
-		byTunnelIP:   make(map[string]*relaySession),
-		byClientKey:  make(map[[crypto.KeyLen]byte]*relaySession),
-		pacingCtx:    pacingCtx,
-		pacingCancel: pacingCancel,
+		cfg:              cfg,
+		conn:             conn,
+		dev:              dev,
+		pool:             pool,
+		byIndex:          make(map[uint32]*relaySession),
+		byTunnelIP:       make(map[string]*relaySession),
+		byClientKey:      make(map[[crypto.KeyLen]byte]*relaySession),
+		handshakeLimiter: newHandshakeLimiter(defaultHandshakeRate, defaultHandshakeBurst, defaultHandshakeMaxSources),
+		newResponder:     crypto.NewResponder,
+		pacingCtx:        pacingCtx,
+		pacingCancel:     pacingCancel,
 	}
 	go r.livenessLoop()
 	return r, nil
@@ -776,7 +780,17 @@ func (r *Relay) handleUDP(buf []byte, src *net.UDPAddr) {
 }
 
 func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
-	responder, err := crypto.NewResponder(r.cfg.RelayKey)
+	// Reject excess unauthenticated handshake work before allocating a Noise responder.
+	// The limiter combines a per-source bucket with a global bucket, so both a single
+	// abusive address and source-rotation/spoofing attacks are bounded.
+	if src == nil || r.handshakeLimiter == nil || !r.handshakeLimiter.allow(src.IP, time.Now()) {
+		return
+	}
+	responderFactory := r.newResponder
+	if responderFactory == nil {
+		responderFactory = crypto.NewResponder
+	}
+	responder, err := responderFactory(r.cfg.RelayKey)
 	if err != nil {
 		log.Printf("bond: new responder: %v", err)
 		return

@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	defaultHandshakeRate       = 5.0
-	defaultHandshakeBurst      = 10.0
-	defaultHandshakeGlobalRate = 100.0
+	defaultHandshakeRate        = 5.0
+	defaultHandshakeBurst       = 10.0
+	defaultHandshakeGlobalRate  = 100.0
 	defaultHandshakeGlobalBurst = 200.0
-	defaultHandshakeMaxSources = 4096
+	defaultHandshakeMaxSources  = 4096
 )
 
 type handshakeLimiter struct {
