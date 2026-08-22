@@ -8,7 +8,7 @@ import (
 )
 
 func TestHandshakeLimiterBurstAndRefill(t *testing.T) {
-	l := newHandshakeLimiterWithGlobal(2, 3, 8, 100, 100)
+	l := newHandshakeLimiter(2, 3, 8)
 	ip := net.ParseIP("203.0.113.10")
 	now := time.Unix(100, 0)
 	for i := 0; i < 3; i++ {
