@@ -6,8 +6,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Default to least privilege. Jobs that need stronger permissions opt in locally.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   verify:
@@ -26,6 +27,10 @@ jobs:
   build:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -61,7 +66,7 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
-      - name: Build
+      - name: Build deterministic release archive
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -77,8 +82,14 @@ jobs:
           if [[ "${{ matrix.name }}" == bondify-windows-* ]]; then
             cp desktop/windows/install.ps1 "dist/${{ matrix.name }}/install.ps1"
           fi
-          tar -C dist -czf "dist/${{ matrix.name }}.tar.gz" "${{ matrix.name }}"
+          # Normalize archive metadata so repeated builds of the same source are easier to compare.
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -C dist -czf "dist/${{ matrix.name }}.tar.gz" "${{ matrix.name }}"
           sha256sum "dist/${{ matrix.name }}.tar.gz" > "dist/${{ matrix.name }}.tar.gz.sha256"
+      - name: Attest release archive provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ matrix.name }}.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
@@ -87,7 +98,11 @@ jobs:
             dist/${{ matrix.name }}.tar.gz.sha256
           if-no-files-found: error
 
-  android:
+  # Android currently has no release signing configuration in Gradle. Keep exercising the
+  # full Go -> gomobile -> Gradle chain, but make the output explicitly CI-only and keep it
+  # out of GitHub Releases. Publishing app-debug.apk as a release asset would make an
+  # unsigned/debuggable build look production-ready.
+  android-ci:
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -106,37 +121,51 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
-      - name: Build Android tests and APK
+      - name: Build Android tests and CI-only debug APK
         working-directory: android
         run: |
           chmod +x gradlew
           ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
-      - name: Package APK
+      - name: Package CI-only debug APK
         run: |
           mkdir -p dist
-          cp android/app/build/outputs/apk/debug/app-debug.apk dist/bondify-android-debug.apk
-          sha256sum dist/bondify-android-debug.apk > dist/bondify-android-debug.apk.sha256
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/bondify-android-UNSIGNED-DEBUG.apk
+          sha256sum dist/bondify-android-UNSIGNED-DEBUG.apk > dist/bondify-android-UNSIGNED-DEBUG.apk.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: bondify-android-debug
+          name: ci-android-unsigned-debug
           path: |
-            dist/bondify-android-debug.apk
-            dist/bondify-android-debug.apk.sha256
+            dist/bondify-android-UNSIGNED-DEBUG.apk
+            dist/bondify-android-UNSIGNED-DEBUG.apk.sha256
           if-no-files-found: error
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, android]
+    needs: [build, android-ci]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
+          # Only the desktop/relay matrix artifacts use the bondify-* namespace.
+          # The CI-only Android debug APK is intentionally named ci-android-* and cannot
+          # leak into the release asset directory through this download step.
+          pattern: bondify-*
           path: release-assets
           merge-multiple: true
-      - name: Consolidate checksums
+      - name: Verify release asset boundary and checksums
         run: |
           set -euo pipefail
+          if find release-assets -maxdepth 1 -type f -name '*.apk' | grep -q .; then
+            echo 'Refusing to publish an Android APK: no signed Android release configuration exists yet.' >&2
+            exit 1
+          fi
+          find release-assets -maxdepth 1 -type f -name '*.sha256' -print0 | sort -z | while IFS= read -r -d '' sum; do
+            (cd release-assets && sha256sum -c "$(basename "$sum")")
+          done
           find release-assets -maxdepth 1 -type f -name '*.sha256' -print0 | sort -z | xargs -0 cat > release-assets/SHA256SUMS
+          test -s release-assets/SHA256SUMS
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
