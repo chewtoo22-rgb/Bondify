@@ -44,9 +44,6 @@ func TestLoadOrGenerateKeyCreatesMissingFileAndReloadsIdentity(t *testing.T) {
 }
 
 func TestLoadOrGenerateKeyFailsClosedOnNonNotExistReadError(t *testing.T) {
-	// A directory at the configured key-file path is an existing filesystem object, but
-	// it cannot be read as the relay key. The loader must return that read failure rather
-	// than treating it as a missing key and generating a replacement identity.
 	path := filepath.Join(t.TempDir(), "relay.key")
 	if err := os.Mkdir(path, 0700); err != nil {
 		t.Fatalf("mkdir key-path sentinel: %v", err)
@@ -69,5 +66,29 @@ func TestLoadOrGenerateKeyFailsClosedOnNonNotExistReadError(t *testing.T) {
 	}
 	if !info.IsDir() {
 		t.Fatalf("key-path sentinel was replaced; expected directory")
+	}
+}
+
+func TestCreateKeyFileExclusiveRefusesExistingPathWithoutTruncating(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "relay.key")
+	const sentinel = "do-not-truncate\n"
+	if err := os.WriteFile(path, []byte(sentinel), 0600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	err := createKeyFileExclusive(path, []byte("replacement-private-key\n"))
+	if err == nil {
+		t.Fatal("expected exclusive create to fail for an existing path")
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("expected EEXIST classification, got: %v", err)
+	}
+
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read sentinel after refused create: %v", readErr)
+	}
+	if string(got) != sentinel {
+		t.Fatalf("existing key path was modified: got %q want %q", got, sentinel)
 	}
 }
