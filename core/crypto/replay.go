@@ -124,6 +124,7 @@ func shiftWords(bits []uint64, n uint64) {
 				if i-wordShift-1 >= 0 {
 					v |= bits[i-wordShift-1] >> (64 - bitShift)
 				}
+			}
 		}
 		bits[i] = v
 	}
