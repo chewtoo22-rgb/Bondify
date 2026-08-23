@@ -47,6 +47,10 @@ func TestWireParsersAdversarialCorpus(t *testing.T) {
 			if !errors.Is(outerErr, ErrShortBuffer) || outerN != 0 {
 				t.Fatalf("outer len=%d: consumed=%d err=%v", n, outerN, outerErr)
 			}
+		} else if buf[1] != Version {
+			if !errors.Is(outerErr, ErrBadVersion) || outerN != 0 {
+				t.Fatalf("outer len=%d version=%d: consumed=%d err=%v, want consumed=0 ErrBadVersion", n, buf[1], outerN, outerErr)
+			}
 		} else if outerErr != nil || outerN != OuterPrefixLen {
 			t.Fatalf("outer len=%d: consumed=%d err=%v, want %d,nil", n, outerN, outerErr, OuterPrefixLen)
 		}
@@ -74,6 +78,7 @@ func TestWireParsersAdversarialCorpus(t *testing.T) {
 func FuzzOuterHeaderRoundTrip(f *testing.F) {
 	f.Add(byte(TypeData), Version, uint32(0x12345678), []byte("0123456789ab"))
 	f.Add(byte(TypeProbe), Version, uint32(0), []byte{})
+	f.Add(byte(TypeData), byte(0xff), uint32(7), []byte("future"))
 	f.Fuzz(func(t *testing.T, typ byte, version byte, session uint32, nonceBytes []byte) {
 		var nonce [NonceLen]byte
 		copy(nonce[:], nonceBytes)
@@ -83,6 +88,15 @@ func FuzzOuterHeaderRoundTrip(f *testing.F) {
 			t.Fatalf("MarshalOuter: %v", err)
 		}
 		got, consumed, err := UnmarshalOuter(buf)
+		if version != Version {
+			if !errors.Is(err, ErrBadVersion) || consumed != 0 {
+				t.Fatalf("unsupported version %d: got=%+v consumed=%d err=%v, want consumed=0 ErrBadVersion", version, got, consumed, err)
+			}
+			if got.Type != Type(typ) || got.Version != version {
+				t.Fatalf("unsupported version diagnostics: got type=%d version=%d want type=%d version=%d", got.Type, got.Version, typ, version)
+			}
+			return
+		}
 		if err != nil {
 			t.Fatalf("UnmarshalOuter: %v", err)
 		}
