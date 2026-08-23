@@ -2,6 +2,7 @@ package diag
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"testing"
 )
@@ -105,7 +106,39 @@ func TestServerSnapshotCalledPerRequest(t *testing.T) {
 
 func TestServerAddrIsLoopback(t *testing.T) {
 	s := startTestServer(t, func() any { return fakeSnapshot{} })
-	if s.Addr() == "" {
-		t.Fatal("empty addr")
+	tcpAddr, err := net.ResolveTCPAddr("tcp", s.Addr())
+	if err != nil {
+		t.Fatalf("ResolveTCPAddr: %v", err)
+	}
+	if tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+		t.Fatalf("server bound %q, want loopback", s.Addr())
+	}
+}
+
+func TestServerRejectsNonLoopbackBind(t *testing.T) {
+	for _, addr := range []string{"0.0.0.0:0", "[::]:0"} {
+		t.Run(addr, func(t *testing.T) {
+			s, err := NewServer(addr, func() any { return fakeSnapshot{} })
+			if err == nil {
+				_ = s.Close()
+				t.Fatalf("NewServer(%q) succeeded; diagnostics must remain loopback-only", addr)
+			}
+		})
+	}
+}
+
+func TestServerAcceptsLocalhostName(t *testing.T) {
+	s, err := NewServer("localhost:0", func() any { return fakeSnapshot{} })
+	if err != nil {
+		t.Fatalf("NewServer(localhost): %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", s.Addr())
+	if err != nil {
+		t.Fatalf("ResolveTCPAddr: %v", err)
+	}
+	if tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+		t.Fatalf("localhost resolved/bound %q, want loopback", s.Addr())
 	}
 }
