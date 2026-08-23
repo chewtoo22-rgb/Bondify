@@ -108,7 +108,7 @@ func marshalCBOR(v interface{}) ([]byte, error) {
 }
 
 func unmarshalCBOR(b []byte, v interface{}) error {
-	if err := cbor.Unmarshal(b, v); err != nil {
+	if err := wireDecMode.Unmarshal(b, v); err != nil {
 		return fmt.Errorf("bond: unmarshal: %w", err)
 	}
 	return nil
