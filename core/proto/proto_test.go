@@ -42,6 +42,20 @@ func TestOuterShortBuffer(t *testing.T) {
 	}
 }
 
+func TestOuterRejectsNonzeroReservedBytes(t *testing.T) {
+	buf := make([]byte, OuterPrefixLen)
+	if err := MarshalOuter(buf, OuterHeader{Type: TypeData, Version: Version}); err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, idx := range []int{2, 3} {
+		mutated := append([]byte(nil), buf...)
+		mutated[idx] = 1
+		if _, _, err := UnmarshalOuter(mutated); err != ErrReserved {
+			t.Fatalf("reserved byte %d error = %v, want ErrReserved", idx, err)
+		}
+	}
+}
+
 func TestInnerRoundTrip(t *testing.T) {
 	h := InnerDataHeader{
 		GSN:          0x0102030405060708,
@@ -65,6 +79,28 @@ func TestInnerRoundTrip(t *testing.T) {
 	}
 	if got != h {
 		t.Fatalf("round trip mismatch: got %+v want %+v", got, h)
+	}
+}
+
+func TestInnerRejectsReservedFlagBits(t *testing.T) {
+	for _, flag := range []uint8{1 << 6, 1 << 7, reservedFlagsMask} {
+		if err := MarshalInner(make([]byte, InnerHeaderLen), InnerDataHeader{Flags: flag}); err != ErrReserved {
+			t.Fatalf("marshal flags %#x error = %v, want ErrReserved", flag, err)
+		}
+
+		buf := make([]byte, InnerHeaderLen)
+		buf[13] = flag
+		if _, _, err := UnmarshalInner(buf); err != ErrReserved {
+			t.Fatalf("unmarshal flags %#x error = %v, want ErrReserved", flag, err)
+		}
+	}
+}
+
+func TestInnerRejectsNonzeroPadding(t *testing.T) {
+	buf := make([]byte, InnerHeaderLen)
+	buf[19] = 1
+	if _, _, err := UnmarshalInner(buf); err != ErrReserved {
+		t.Fatalf("padding error = %v, want ErrReserved", err)
 	}
 }
 
