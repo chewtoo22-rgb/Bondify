@@ -137,12 +137,12 @@ func TestClientTunnelConcurrentAddPathSameIDIsRejectedWhileFirstIsInFlight(t *te
 	if err != nil {
 		t.Fatalf("listen sink: %v", err)
 	}
-	defer sink.Close()
+	defer func() { _ = sink.Close() }()
 	blockedConn, err := net.DialUDP("udp", nil, sink.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatalf("dial sink: %v", err)
 	}
-	defer blockedConn.Close()
+	defer func() { _ = blockedConn.Close() }()
 
 	tun.handshakeTO = 400 * time.Millisecond
 	tun.handshakeTry = 1
