@@ -10,6 +10,23 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
+// wireDecMode is deliberately stricter than fxamacker/cbor's permissive defaults for
+// attacker-controlled protocol payloads. Duplicate map keys are ambiguous (the default
+// decoder may keep either the first or last value depending on destination type), while
+// indefinite-length items and semantic tags are not part of BOND/1's fixed control/config
+// schema. Rejecting all three keeps authenticated wire parsing deterministic and fail-closed.
+var wireDecMode = func() cbor.DecMode {
+	dm, err := cbor.DecOptions{
+		DupMapKey:  cbor.DupMapKeyEnforcedAPF,
+		IndefLength: cbor.IndefLengthForbidden,
+		TagsMd:     cbor.TagsForbidden,
+	}.DecMode()
+	if err != nil {
+		panic(fmt.Sprintf("bond: create strict CBOR decoder: %v", err))
+	}
+	return dm
+}()
+
 // HandshakeRespPayload is carried as the encrypted payload of the Noise IK response
 // message (HANDSHAKE_RESP) — see PROTOCOL.md §5's establishment diagram: "HANDSHAKE_RESP
 // (session idx, cfg)". Bundling cfg_push into the handshake response itself (rather than a
@@ -34,7 +51,7 @@ func (p HandshakeRespPayload) Marshal() ([]byte, error) {
 
 func UnmarshalHandshakeResp(b []byte) (HandshakeRespPayload, error) {
 	var p HandshakeRespPayload
-	if err := cbor.Unmarshal(b, &p); err != nil {
+	if err := wireDecMode.Unmarshal(b, &p); err != nil {
 		return p, fmt.Errorf("bond: unmarshal cfg_push: %w", err)
 	}
 	return p, nil
