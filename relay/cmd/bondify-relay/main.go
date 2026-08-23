@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -183,7 +184,7 @@ func main() {
 }
 
 func loadOrGenerateKey(path string) (crypto.Keypair, error) {
-	b, err := os.ReadFile(path)
+	b, err := readExistingKeyFile(path)
 	if err == nil {
 		priv, err := crypto.DecodeKey(strings.TrimSpace(string(b)))
 		if err != nil {
@@ -208,6 +209,31 @@ func loadOrGenerateKey(path string) (crypto.Keypair, error) {
 		return crypto.Keypair{}, err
 	}
 	return kp, nil
+}
+
+func readExistingKeyFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("key path is not a regular file")
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return nil, fmt.Errorf("unsafe key permissions %04o: group/world access must be removed", info.Mode().Perm())
+	}
+
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func createKeyFileExclusive(path string, data []byte) error {
