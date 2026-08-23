@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -185,19 +186,26 @@ func main() {
 }
 
 func loadOrGenerateKey(path string) (crypto.Keypair, error) {
-	if b, err := os.ReadFile(path); err == nil {
+	b, err := os.ReadFile(path)
+	if err == nil {
 		priv, err := crypto.DecodeKey(strings.TrimSpace(string(b)))
 		if err != nil {
 			return crypto.Keypair{}, err
 		}
 		return crypto.Keypair{Private: priv, Public: crypto.DerivePublic(priv)}, nil
 	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return crypto.Keypair{}, fmt.Errorf("relay: read key file: %w", err)
+	}
+
 	kp, err := crypto.GenerateKeypair()
 	if err != nil {
 		return crypto.Keypair{}, err
 	}
 	if dir := parentDir(path); dir != "" {
-		_ = os.MkdirAll(dir, 0700)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return crypto.Keypair{}, fmt.Errorf("relay: create key directory: %w", err)
+		}
 	}
 	if err := os.WriteFile(path, []byte(crypto.EncodeKey(kp.Private)+"\n"), 0600); err != nil {
 		return crypto.Keypair{}, fmt.Errorf("relay: write key file: %w", err)
