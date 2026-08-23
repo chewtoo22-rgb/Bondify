@@ -382,8 +382,9 @@ type ClientTunnel struct {
 	bulkPacer  atomic.Pointer[budget.Pacer]
 	sendMu     sync.Mutex
 
-	pathsMu sync.RWMutex
-	paths   []*Path
+	pathsMu        sync.RWMutex
+	paths          []*Path
+	pendingPathIDs map[uint8]struct{}
 	// schedPathView is immutable and replaced whenever a path is added, avoiding two
 	// slice allocations for every packet sent through the scheduler.
 	schedPathView atomic.Value // []sched.Path
@@ -442,6 +443,34 @@ func (t *ClientTunnel) pathByID(id uint8) *Path {
 		}
 	}
 	return nil
+}
+
+// reservePathID atomically checks both registered and in-flight path IDs, then marks id as
+// in-flight. The reservation spans dialing plus the PATH_ADD exchange so a concurrent
+// AddPath with the same ID cannot pass an earlier read-only duplicate check and race a
+// second registration into the path list.
+func (t *ClientTunnel) reservePathID(id uint8) bool {
+	t.pathsMu.Lock()
+	defer t.pathsMu.Unlock()
+	for _, p := range t.paths {
+		if p.id == id {
+			return false
+		}
+	}
+	if t.pendingPathIDs == nil {
+		t.pendingPathIDs = make(map[uint8]struct{})
+	}
+	if _, exists := t.pendingPathIDs[id]; exists {
+		return false
+	}
+	t.pendingPathIDs[id] = struct{}{}
+	return true
+}
+
+func (t *ClientTunnel) releasePathIDReservation(id uint8) {
+	t.pathsMu.Lock()
+	delete(t.pendingPathIDs, id)
+	t.pathsMu.Unlock()
 }
 
 // removePath takes id out of the schedulable pool (and the plain path list) and returns it,
@@ -516,9 +545,11 @@ func (t *ClientTunnel) spawnPathLoops(ctx context.Context, p *Path) {
 // API" -- see mobile/mobile.go and android/app's BondifyVpnService.kt for the platform side
 // that calls it from a ConnectivityManager.NetworkCallback.
 func (t *ClientTunnel) AddPath(ctx context.Context, id uint8, spec PathSpec) error {
-	if t.pathByID(id) != nil {
-		return fmt.Errorf("bond: path %d already registered", id)
+	if !t.reservePathID(id) {
+		return fmt.Errorf("bond: path %d already registered or being registered", id)
 	}
+	defer t.releasePathIDReservation(id)
+
 	if err := t.addPath(ctx, id, spec, t.handshakeTO, t.handshakeTry); err != nil {
 		return err
 	}

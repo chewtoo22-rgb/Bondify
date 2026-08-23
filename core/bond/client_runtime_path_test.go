@@ -3,6 +3,7 @@ package bond
 import (
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,63 @@ func TestClientTunnelAddPathRejectsDuplicateID(t *testing.T) {
 
 	if err := tun.AddPath(context.Background(), 0, PathSpec{}); err == nil {
 		t.Fatal("expected an error re-registering path 0, got nil")
+	}
+}
+
+func TestClientTunnelConcurrentAddPathSameIDIsRejectedWhileFirstIsInFlight(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, _ := mustClientTunnel(t, r, relayKP)
+
+	// Point the first registration at a UDP sink that receives PATH_ADD but never ACKs it.
+	// Once the sink sees that packet, the first call is deterministically inside addPath's
+	// handshake window, which is exactly where the old read-check-then-append race lived.
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("listen sink: %v", err)
+	}
+	defer func() { _ = sink.Close() }()
+	blockedConn, err := net.DialUDP("udp", nil, sink.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial sink: %v", err)
+	}
+	defer func() { _ = blockedConn.Close() }()
+
+	tun.handshakeTO = 400 * time.Millisecond
+	tun.handshakeTry = 1
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- tun.AddPath(context.Background(), 7, PathSpec{Conn: blockedConn})
+	}()
+
+	buf := make([]byte, 2048)
+	if err := sink.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set sink deadline: %v", err)
+	}
+	if _, _, err := sink.ReadFromUDP(buf); err != nil {
+		t.Fatalf("first AddPath never entered PATH_ADD exchange: %v", err)
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- tun.AddPath(context.Background(), 7, PathSpec{})
+	}()
+	select {
+	case err := <-secondDone:
+		if err == nil || !strings.Contains(err.Error(), "already registered or being registered") {
+			t.Fatalf("concurrent same-ID AddPath error = %v, want reservation rejection", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("concurrent same-ID AddPath did not fail immediately; duplicate registration entered the handshake path")
+	}
+
+	if err := <-firstDone; err == nil {
+		t.Fatal("blocked first AddPath unexpectedly succeeded without a PATH_ADD ACK")
+	}
+
+	// A failed registration must release the reservation. Reusing the same ID against the
+	// real relay should succeed, proving the fix does not permanently consume path IDs.
+	if err := tun.AddPath(context.Background(), 7, PathSpec{}); err != nil {
+		t.Fatalf("AddPath after failed reserved registration: %v", err)
 	}
 }
 
