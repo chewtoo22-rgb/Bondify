@@ -23,11 +23,17 @@ func newReplayWindow(size int) *replayWindow {
 }
 
 // CheckOnly reports whether counter is acceptable (not already seen, not too old) without
-// marking it seen — used to gate work (AEAD verification) that should not run at all for
-// packets that are replays on their face.
+// marking it seen. Session.Open no longer composes CheckOnly and MarkSeen itself because
+// doing so leaves a race where two concurrent copies of the same authenticated packet can
+// both pass the check before either marks the nonce. Use authenticateAndMark for receive
+// admission that must be atomic with authentication.
 func (w *replayWindow) CheckOnly(counter uint64) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.acceptableLocked(counter)
+}
+
+func (w *replayWindow) acceptableLocked(counter uint64) bool {
 	if !w.inited {
 		return true
 	}
@@ -42,12 +48,33 @@ func (w *replayWindow) CheckOnly(counter uint64) bool {
 	return w.bits[word]&(1<<bit) == 0
 }
 
+// authenticateAndMark serializes replay admission and successful authentication for one
+// path. Holding the window lock across authenticate is deliberate: a nonce must have one
+// winner. We still do not mark the nonce until authenticate succeeds, so unauthenticated
+// garbage cannot burn a legitimate future counter value.
+func (w *replayWindow) authenticateAndMark(counter uint64, authenticate func() error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.acceptableLocked(counter) {
+		return ErrReplay
+	}
+	if err := authenticate(); err != nil {
+		return err
+	}
+	w.markSeenLocked(counter)
+	return nil
+}
+
 // MarkSeen records counter as consumed. Callers must only call this after successful AEAD
-// verification (see Session.Open) so an attacker cannot burn counter values that belong to
-// a legitimate sender by sending garbage with a guessed nonce.
+// verification. Receive-side Session.Open uses authenticateAndMark so the check+mark pair
+// cannot be raced; MarkSeen remains available to the replay-window unit tests and helpers.
 func (w *replayWindow) MarkSeen(counter uint64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.markSeenLocked(counter)
+}
+
+func (w *replayWindow) markSeenLocked(counter uint64) {
 	if !w.inited {
 		w.max = counter
 		w.inited = true

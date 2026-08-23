@@ -89,23 +89,25 @@ func (s *Session) Open(pathID uint8, ciphertext, ad []byte, nonce [NonceLen]byte
 	if nonce[0] != pathID {
 		return nil, ErrAuthFailed
 	}
-	win := s.recvWindow(pathID)
-	counter := nonceCounter(nonce)
-	if !win.CheckOnly(counter) {
-		return nil, ErrReplay
-	}
 	aead, err := chacha20poly1305.New(s.recvKey[:])
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := aead.Open(nil, nonce[:], ciphertext, ad)
+
+	win := s.recvWindow(pathID)
+	counter := nonceCounter(nonce)
+	var plaintext []byte
+	err = win.authenticateAndMark(counter, func() error {
+		var openErr error
+		plaintext, openErr = aead.Open(nil, nonce[:], ciphertext, ad)
+		if openErr != nil {
+			return ErrAuthFailed
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, ErrAuthFailed
+		return nil, err
 	}
-	// Only mark the counter used once AEAD verification has actually succeeded — an
-	// attacker replaying or corrupting a packet must never be able to burn a legitimate
-	// future counter value out from under the real sender.
-	win.MarkSeen(counter)
 	return plaintext, nil
 }
 
