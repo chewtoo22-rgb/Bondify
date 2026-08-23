@@ -146,6 +146,9 @@ func UnmarshalOuter(src []byte) (OuterHeader, int, error) {
 	}
 	h.Type = Type(src[0])
 	h.Version = src[1]
+	if h.Version != Version {
+		return h, 0, ErrBadVersion
+	}
 	h.SessionIndex = binary.BigEndian.Uint32(src[4:8])
 	copy(h.Nonce[:], src[8:8+NonceLen])
 	return h, OuterPrefixLen, nil
