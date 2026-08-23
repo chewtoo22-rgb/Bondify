@@ -51,6 +51,10 @@ func TestWireParsersAdversarialCorpus(t *testing.T) {
 			if !errors.Is(outerErr, ErrBadVersion) || outerN != 0 {
 				t.Fatalf("outer len=%d version=%d: consumed=%d err=%v, want consumed=0 ErrBadVersion", n, buf[1], outerN, outerErr)
 			}
+		} else if buf[2] != 0 || buf[3] != 0 {
+			if !errors.Is(outerErr, ErrReserved) || outerN != 0 {
+				t.Fatalf("outer len=%d reserved=%x%x: consumed=%d err=%v, want consumed=0 ErrReserved", n, buf[2], buf[3], outerN, outerErr)
+			}
 		} else if outerErr != nil || outerN != OuterPrefixLen {
 			t.Fatalf("outer len=%d: consumed=%d err=%v, want %d,nil", n, outerN, outerErr, OuterPrefixLen)
 		}
@@ -59,6 +63,10 @@ func TestWireParsersAdversarialCorpus(t *testing.T) {
 		if n < InnerHeaderLen {
 			if !errors.Is(innerErr, ErrShortBuffer) || innerN != 0 {
 				t.Fatalf("inner len=%d: consumed=%d err=%v", n, innerN, innerErr)
+			}
+		} else if buf[13]&^KnownFlagMask != 0 || buf[19] != 0 {
+			if !errors.Is(innerErr, ErrReserved) || innerN != 0 {
+				t.Fatalf("inner len=%d flags=%02x pad=%02x: consumed=%d err=%v, want consumed=0 ErrReserved", n, buf[13], buf[19], innerN, innerErr)
 			}
 		} else if innerErr != nil || innerN != InnerHeaderLen {
 			t.Fatalf("inner len=%d: consumed=%d err=%v, want %d,nil", n, innerN, innerErr, InnerHeaderLen)
@@ -108,10 +116,18 @@ func FuzzOuterHeaderRoundTrip(f *testing.F) {
 
 func FuzzInnerHeaderRoundTrip(f *testing.F) {
 	f.Add(uint64(1), uint32(2), byte(3), byte(FlagRTX|FlagFECProtected), uint16(1400), uint16(7), byte(4))
+	f.Add(uint64(1), uint32(2), byte(3), byte(0xc0), uint16(1400), uint16(7), byte(4))
 	f.Fuzz(func(t *testing.T, gsn uint64, psn uint32, pathID, flags byte, payloadLen, generationID uint16, genIndex byte) {
 		want := InnerDataHeader{GSN: gsn, PSN: psn, PathID: pathID, Flags: flags, PayloadLen: payloadLen, GenerationID: generationID, GenIndex: genIndex}
 		buf := bytes.Repeat([]byte{0xff}, InnerHeaderLen)
-		if err := MarshalInner(buf, want); err != nil {
+		err := MarshalInner(buf, want)
+		if flags&^KnownFlagMask != 0 {
+			if !errors.Is(err, ErrReserved) {
+				t.Fatalf("MarshalInner flags=%02x: err=%v, want ErrReserved", flags, err)
+			}
+			return
+		}
+		if err != nil {
 			t.Fatalf("MarshalInner: %v", err)
 		}
 		if buf[InnerHeaderLen-1] != 0 {
