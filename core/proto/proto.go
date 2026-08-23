@@ -68,6 +68,7 @@ const (
 	FlagFECProtected uint8 = 1 << 4
 	FlagPUSH         uint8 = 1 << 5
 	// bits 6-7 reserved, must be zero.
+	KnownFlagMask uint8 = FlagDUP | FlagRTX | FlagLATENCY | FlagBULK | FlagFECProtected | FlagPUSH
 )
 
 const (
@@ -98,6 +99,7 @@ const (
 var (
 	ErrShortBuffer  = errors.New("proto: buffer too short")
 	ErrBadVersion   = errors.New("proto: unsupported version")
+	ErrReserved     = errors.New("proto: non-zero reserved field")
 	ErrPayloadTooLg = errors.New("proto: payload exceeds 16-bit length field")
 )
 
@@ -149,6 +151,9 @@ func UnmarshalOuter(src []byte) (OuterHeader, int, error) {
 	if h.Version != Version {
 		return h, 0, ErrBadVersion
 	}
+	if src[2] != 0 || src[3] != 0 {
+		return h, 0, ErrReserved
+	}
 	h.SessionIndex = binary.BigEndian.Uint32(src[4:8])
 	copy(h.Nonce[:], src[8:8+NonceLen])
 	return h, OuterPrefixLen, nil
@@ -182,6 +187,9 @@ func MarshalInner(dst []byte, h InnerDataHeader) error {
 	if len(dst) < InnerHeaderLen {
 		return ErrShortBuffer
 	}
+	if h.Flags&^KnownFlagMask != 0 {
+		return ErrReserved
+	}
 	binary.BigEndian.PutUint64(dst[0:8], h.GSN)
 	binary.BigEndian.PutUint32(dst[8:12], h.PSN)
 	dst[12] = h.PathID
@@ -198,6 +206,9 @@ func UnmarshalInner(src []byte) (InnerDataHeader, int, error) {
 	var h InnerDataHeader
 	if len(src) < InnerHeaderLen {
 		return h, 0, ErrShortBuffer
+	}
+	if src[13]&^KnownFlagMask != 0 || src[19] != 0 {
+		return h, 0, ErrReserved
 	}
 	h.GSN = binary.BigEndian.Uint64(src[0:8])
 	h.PSN = binary.BigEndian.Uint32(src[8:12])
