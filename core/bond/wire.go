@@ -6,6 +6,7 @@ package bond
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -32,10 +33,58 @@ func (p HandshakeRespPayload) Marshal() ([]byte, error) {
 	return b, nil
 }
 
+// Validate rejects an authenticated-but-semantically-invalid relay configuration before a
+// platform layer uses it to create an interface, install routes, or configure DNS. Noise
+// authenticates who sent cfg_push; it does not make impossible interface values safe to
+// hand to Linux, Windows, or Android APIs.
+//
+// MTU zero is retained as a compatibility sentinel for older relays/clients that negotiate
+// no MTU and use a local fallback. Any explicit MTU must be large enough for an IPv4 tunnel
+// and fit the protocol's uint16 payload-length field.
+func (p HandshakeRespPayload) Validate() error {
+	if p.SessionIndex == 0 {
+		return fmt.Errorf("bond: cfg_push session index must be non-zero")
+	}
+	if p.Prefix < 1 || p.Prefix > 30 {
+		return fmt.Errorf("bond: cfg_push IPv4 prefix %d outside supported range 1..30", p.Prefix)
+	}
+	tunnelIP := net.ParseIP(p.TunnelIP)
+	if tunnelIP == nil || tunnelIP.To4() == nil {
+		return fmt.Errorf("bond: cfg_push tunnel ip %q is not IPv4", p.TunnelIP)
+	}
+	gatewayIP := net.ParseIP(p.GatewayIP)
+	if gatewayIP == nil || gatewayIP.To4() == nil {
+		return fmt.Errorf("bond: cfg_push gateway ip %q is not IPv4", p.GatewayIP)
+	}
+	if tunnelIP.Equal(gatewayIP) {
+		return fmt.Errorf("bond: cfg_push tunnel ip and gateway must differ")
+	}
+	mask := net.CIDRMask(p.Prefix, 32)
+	network := &net.IPNet{IP: tunnelIP.Mask(mask), Mask: mask}
+	if !network.Contains(gatewayIP) {
+		return fmt.Errorf("bond: cfg_push tunnel ip %s/%d and gateway %s are not in the same subnet", p.TunnelIP, p.Prefix, p.GatewayIP)
+	}
+	if p.MTU != 0 && (p.MTU < 576 || p.MTU > 65535) {
+		return fmt.Errorf("bond: cfg_push mtu %d outside supported range 576..65535", p.MTU)
+	}
+	if p.KeepaliveSec < 0 {
+		return fmt.Errorf("bond: cfg_push keepalive must be >= 0")
+	}
+	for _, server := range p.DNS {
+		if net.ParseIP(server) == nil {
+			return fmt.Errorf("bond: cfg_push dns server %q is not an IP address", server)
+		}
+	}
+	return nil
+}
+
 func UnmarshalHandshakeResp(b []byte) (HandshakeRespPayload, error) {
 	var p HandshakeRespPayload
 	if err := cbor.Unmarshal(b, &p); err != nil {
 		return p, fmt.Errorf("bond: unmarshal cfg_push: %w", err)
+	}
+	if err := p.Validate(); err != nil {
+		return p, err
 	}
 	return p, nil
 }
