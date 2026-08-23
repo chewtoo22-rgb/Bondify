@@ -98,9 +98,6 @@ func main() {
 		log.Fatalf("relay: bad -mode: %v", err)
 	}
 	if *fec && sendMode == bond.ModeRedundant {
-		// See the matching check in desktop/cmd/bondify/main.go: sendRedundant never
-		// stamps FlagFECProtected or records into fecSend, so FEC would sit permanently
-		// allocated and inert for the relay's own return traffic too.
 		log.Printf("relay: warning: -fec has no effect in -mode redundant; disabling it")
 		*fec = false
 	}
@@ -207,10 +204,37 @@ func loadOrGenerateKey(path string) (crypto.Keypair, error) {
 			return crypto.Keypair{}, fmt.Errorf("relay: create key directory: %w", err)
 		}
 	}
-	if err := os.WriteFile(path, []byte(crypto.EncodeKey(kp.Private)+"\n"), 0600); err != nil {
-		return crypto.Keypair{}, fmt.Errorf("relay: write key file: %w", err)
+	if err := createKeyFileExclusive(path, []byte(crypto.EncodeKey(kp.Private)+"\n")); err != nil {
+		return crypto.Keypair{}, err
 	}
 	return kp, nil
+}
+
+func createKeyFileExclusive(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return fmt.Errorf("relay: create key file: %w", err)
+	}
+	removeOnFailure := true
+	defer func() {
+		if removeOnFailure {
+			_ = os.Remove(path)
+		}
+	}()
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("relay: write key file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("relay: sync key file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("relay: close key file: %w", err)
+	}
+	removeOnFailure = false
+	return nil
 }
 
 func parentDir(path string) string {
