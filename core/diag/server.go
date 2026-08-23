@@ -24,27 +24,31 @@ type Snapshot func() any
 
 // Server is a minimal HTTP server exposing one Snapshot as JSON plus a liveness check.
 // It is not a general-purpose API: no auth, no TLS, read-only endpoints -- appropriate only
-// because it is meant to bind to loopback only, never a routable address.
+// because NewServer enforces a loopback-only listener.
 type Server struct {
 	http *http.Server
 	ln   net.Listener
 }
 
-// NewServer builds a diagnostics server bound to addr (host:port). addr should resolve to
-// a loopback address (127.0.0.1/::1) -- binding anywhere else would expose live network
-// statistics to whatever network that address is reachable from. NewServer does not
-// silently rewrite a non-loopback addr; it logs a loud warning instead, since a caller may
-// have a deliberate reason (e.g. a container's own isolated network namespace) and refusing
-// outright would be presumptuous.
+// NewServer builds a diagnostics server bound to addr (host:port). The resolved address must
+// be loopback (127.0.0.0/8 or ::1). Diagnostics intentionally have no authentication or TLS,
+// and the full endpoint contains live tunnel/session metadata, so accepting a wildcard or
+// routable bind here would violate this package's local-only security boundary.
+//
+// Resolve once and pass that exact *net.TCPAddr to ListenTCP rather than validating a hostname
+// and then asking net.Listen to resolve it a second time. That avoids a DNS-rebinding/TOCTOU
+// gap between the security check and the address that is actually bound.
 func NewServer(addr string, snap Snapshot) (*Server, error) {
-	ln, err := net.Listen("tcp", addr)
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("diag: resolve %s: %w", addr, err)
+	}
+	if tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+		return nil, fmt.Errorf("diag: refusing non-loopback diagnostics address %q (resolved %s)", addr, tcpAddr)
+	}
+	ln, err := net.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		return nil, fmt.Errorf("diag: listen %s: %w", addr, err)
-	}
-	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok && !tcpAddr.IP.IsLoopback() {
-		log.Printf("diag: WARNING: diagnostics endpoint bound to non-loopback address %s -- "+
-			"live tunnel statistics are reachable from anywhere that can route to it. Bind "+
-			"to 127.0.0.1/::1 unless you specifically intend this.", ln.Addr())
 	}
 
 	mux := http.NewServeMux()
@@ -53,9 +57,8 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		// Permissive CORS: this endpoint only ever listens on loopback, so any page able to
-		// reach it is already running on the same machine -- no cross-origin risk to guard
-		// against, and a browser-based local dashboard needs the header to fetch() it at all.
+		// Permissive CORS is safe only because NewServer enforces loopback at the listener
+		// boundary. A browser-based local dashboard needs the header to fetch() it.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(snap()); err != nil {
