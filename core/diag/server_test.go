@@ -42,8 +42,8 @@ func TestServerServesSnapshotJSON(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
 	}
-	if cors := resp.Header.Get("Access-Control-Allow-Origin"); cors != "*" {
-		t.Errorf("CORS header = %q, want *", cors)
+	if cors := resp.Header.Get("Access-Control-Allow-Origin"); cors != "" {
+		t.Errorf("CORS header = %q without Origin request header, want empty", cors)
 	}
 
 	var got fakeSnapshot
@@ -52,6 +52,47 @@ func TestServerServesSnapshotJSON(t *testing.T) {
 	}
 	if got.Foo != "bar" || got.N != 42 {
 		t.Errorf("got %+v, want {bar 42}", got)
+	}
+}
+
+func TestServerCORSRejectsRemoteWebOrigin(t *testing.T) {
+	s := startTestServer(t, func() any { return fakeSnapshot{Foo: "secret"} })
+	req, err := http.NewRequest(http.MethodGet, "http://"+s.Addr()+"/api/v1/diagnostics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", "https://attacker.example")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if cors := resp.Header.Get("Access-Control-Allow-Origin"); cors != "" {
+		t.Fatalf("remote Origin received CORS permission %q", cors)
+	}
+}
+
+func TestServerCORSAllowsLoopbackDashboardOrigin(t *testing.T) {
+	s := startTestServer(t, func() any { return fakeSnapshot{} })
+	for _, origin := range []string{"http://localhost:3000", "http://127.0.0.1:3000", "https://[::1]:3000"} {
+		t.Run(origin, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, "http://"+s.Addr()+"/api/v1/diagnostics/redacted", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Origin", origin)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if cors := resp.Header.Get("Access-Control-Allow-Origin"); cors != origin {
+				t.Fatalf("CORS header = %q, want %q", cors, origin)
+			}
+			if vary := resp.Header.Get("Vary"); vary != "Origin" {
+				t.Fatalf("Vary = %q, want Origin", vary)
+			}
+		})
 	}
 }
 
