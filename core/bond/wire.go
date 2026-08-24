@@ -87,6 +87,15 @@ func validateHandshakeResp(p HandshakeRespPayload) error {
 	if !tunnelIP.To4().Mask(mask).Equal(gatewayIP.To4().Mask(mask)) {
 		return fmt.Errorf("tunnel ip and gateway are not in the same /%d subnet", p.Prefix)
 	}
+	// For ordinary IPv4 subnets (/30 and larger), neither endpoint may be the subnet's
+	// network or broadcast address. Accept /31 point-to-point endpoints per RFC 3021; /32
+	// cannot contain two distinct endpoints and is already rejected by the same-subnet test.
+	if ipv4NetworkOrBroadcast(tunnelIP, mask) {
+		return fmt.Errorf("tunnel ip %q is a reserved subnet address", p.TunnelIP)
+	}
+	if ipv4NetworkOrBroadcast(gatewayIP, mask) {
+		return fmt.Errorf("gateway ip %q is a reserved subnet address", p.GatewayIP)
+	}
 	// IPv4 hosts are required to handle 576-byte datagrams; values below that are not a
 	// useful tunnel MTU, while values above the IPv4 maximum can cause oversized buffers
 	// and impossible packets. PMTU discovery may safely choose anything within this range.
@@ -97,4 +106,18 @@ func validateHandshakeResp(p HandshakeRespPayload) error {
 		return fmt.Errorf("keepalive must be >= 0")
 	}
 	return nil
+}
+
+func ipv4NetworkOrBroadcast(ip net.IP, mask net.IPMask) bool {
+	ip4 := ip.To4()
+	ones, bits := mask.Size()
+	if ip4 == nil || bits != 32 || ones >= 31 {
+		return false
+	}
+	network := ip4.Mask(mask)
+	broadcast := make(net.IP, net.IPv4len)
+	for i := range broadcast {
+		broadcast[i] = network[i] | ^mask[i]
+	}
+	return ip4.Equal(network) || ip4.Equal(broadcast)
 }
