@@ -6,6 +6,7 @@ package bond
 
 import (
 	"fmt"
+	"net"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -17,9 +18,9 @@ import (
 // schema. Rejecting all three keeps authenticated wire parsing deterministic and fail-closed.
 var wireDecMode = func() cbor.DecMode {
 	dm, err := cbor.DecOptions{
-		DupMapKey:  cbor.DupMapKeyEnforcedAPF,
+		DupMapKey:   cbor.DupMapKeyEnforcedAPF,
 		IndefLength: cbor.IndefLengthForbidden,
-		TagsMd:     cbor.TagsForbidden,
+		TagsMd:      cbor.TagsForbidden,
 	}.DecMode()
 	if err != nil {
 		panic(fmt.Sprintf("bond: create strict CBOR decoder: %v", err))
@@ -54,5 +55,46 @@ func UnmarshalHandshakeResp(b []byte) (HandshakeRespPayload, error) {
 	if err := wireDecMode.Unmarshal(b, &p); err != nil {
 		return p, fmt.Errorf("bond: unmarshal cfg_push: %w", err)
 	}
+	if err := validateHandshakeResp(p); err != nil {
+		return p, fmt.Errorf("bond: invalid cfg_push: %w", err)
+	}
 	return p, nil
+}
+
+// validateHandshakeResp treats the authenticated relay response as untrusted configuration.
+// Noise authenticates who sent these values; it does not make malformed or accidentally
+// misconfigured values safe to feed into TUN setup and buffer sizing. Keep validation here,
+// at the wire boundary, so every caller fails closed before constructing a ClientTunnel.
+func validateHandshakeResp(p HandshakeRespPayload) error {
+	if p.SessionIndex == 0 {
+		return fmt.Errorf("session index must be non-zero")
+	}
+	if p.Prefix < 1 || p.Prefix > 32 {
+		return fmt.Errorf("IPv4 prefix %d out of range", p.Prefix)
+	}
+	tunnelIP := net.ParseIP(p.TunnelIP)
+	if tunnelIP == nil || tunnelIP.To4() == nil {
+		return fmt.Errorf("tunnel ip %q is not IPv4", p.TunnelIP)
+	}
+	gatewayIP := net.ParseIP(p.GatewayIP)
+	if gatewayIP == nil || gatewayIP.To4() == nil {
+		return fmt.Errorf("gateway ip %q is not IPv4", p.GatewayIP)
+	}
+	if tunnelIP.Equal(gatewayIP) {
+		return fmt.Errorf("tunnel ip must differ from gateway")
+	}
+	mask := net.CIDRMask(p.Prefix, 32)
+	if !tunnelIP.To4().Mask(mask).Equal(gatewayIP.To4().Mask(mask)) {
+		return fmt.Errorf("tunnel ip and gateway are not in the same /%d subnet", p.Prefix)
+	}
+	// IPv4 hosts are required to handle 576-byte datagrams; values below that are not a
+	// useful tunnel MTU, while values above the IPv4 maximum can cause oversized buffers
+	// and impossible packets. PMTU discovery may safely choose anything within this range.
+	if p.MTU < 576 || p.MTU > 65535 {
+		return fmt.Errorf("mtu %d out of range", p.MTU)
+	}
+	if p.KeepaliveSec < 0 {
+		return fmt.Errorf("keepalive must be >= 0")
+	}
+	return nil
 }
