@@ -13,6 +13,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -57,9 +59,11 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		// Permissive CORS is safe only because NewServer enforces loopback at the listener
-		// boundary. A browser-based local dashboard needs the header to fetch() it.
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// The listener is loopback-only, but a remote web page can still issue browser requests
+		// to 127.0.0.1. Only opt that page into reading the response when its own Origin is also
+		// loopback; wildcard CORS would turn the local diagnostics endpoint into a cross-origin
+		// exfiltration primitive.
+		setLoopbackCORS(w, r)
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(snap()); err != nil {
 			log.Printf("diag: encode snapshot: %v", err)
@@ -76,7 +80,7 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 			http.Error(w, "diagnostics redaction failed", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		setLoopbackCORS(w, r)
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(redacted); err != nil {
 			log.Printf("diag: encode redacted snapshot: %v", err)
@@ -94,6 +98,24 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 		},
 		ln: ln,
 	}, nil
+}
+
+func setLoopbackCORS(w http.ResponseWriter, r *http.Request) {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Add("Vary", "Origin")
 }
 
 // Addr returns the address actually bound (useful when addr was passed as "127.0.0.1:0").
