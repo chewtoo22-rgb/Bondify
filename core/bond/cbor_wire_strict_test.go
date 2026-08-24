@@ -58,6 +58,56 @@ func TestWireCBORRejectsSemanticTags(t *testing.T) {
 	}
 }
 
+func TestWireCBORRejectsTruncatedControlMap(t *testing.T) {
+	// Declares one key/value pair but omits the value. A truncated authenticated
+	// datagram must never be interpreted as a zero-valued control request.
+	payload := []byte{
+		0xa1,
+		0x63, 'p', 'i', 'd',
+	}
+	var got PathAddPayload
+	if err := unmarshalCBOR(payload, &got); err == nil {
+		t.Fatal("truncated control map was accepted")
+	}
+}
+
+func TestWireCBORRejectsOutOfRangePathID(t *testing.T) {
+	// {"pid": 256}. Path IDs are uint8 on the wire and in the AEAD nonce. Values
+	// outside that domain must fail instead of wrapping or truncating to path zero.
+	payload := []byte{
+		0xa1,
+		0x63, 'p', 'i', 'd',
+		0x19, 0x01, 0x00,
+	}
+	var got PathAddPayload
+	if err := unmarshalCBOR(payload, &got); err == nil {
+		t.Fatal("out-of-range path id was accepted")
+	}
+}
+
+func TestWireCBORRejectsWrongPathIDType(t *testing.T) {
+	// {"pid": "7"}. Control fields are strongly typed; accepting textual aliases
+	// would create alternate authenticated encodings with implementation-specific
+	// coercion behavior.
+	payload := []byte{
+		0xa1,
+		0x63, 'p', 'i', 'd',
+		0x61, '7',
+	}
+	var got PathAddPayload
+	if err := unmarshalCBOR(payload, &got); err == nil {
+		t.Fatal("text path id was accepted")
+	}
+}
+
+func TestWireCBORRejectsNonMapControlPayload(t *testing.T) {
+	// A scalar is never a valid BOND/1 control object.
+	var got PathAddPayload
+	if err := unmarshalCBOR([]byte{0x07}, &got); err == nil {
+		t.Fatal("scalar control payload was accepted")
+	}
+}
+
 func TestWireCBORStillAcceptsCanonicalPayloads(t *testing.T) {
 	want := PathAddPayload{PathID: 7}
 	payload, err := marshalCBOR(want)
