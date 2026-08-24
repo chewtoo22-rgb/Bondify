@@ -1,6 +1,7 @@
 package bond
 
 import (
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -89,6 +90,18 @@ type SessionDiag struct {
 	Aggregate    AggregateDiag `json:"aggregate"`
 }
 
+func sortPathDiagnostics(paths []PathDiag) {
+	sort.Slice(paths, func(i, j int) bool {
+		return paths[i].ID < paths[j].ID
+	})
+}
+
+func sortSessionDiagnostics(sessions []SessionDiag) {
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].SessionIndex < sessions[j].SessionIndex
+	})
+}
+
 // Diagnostics returns the client tunnel's current state as a JSON-ready snapshot -- the
 // payload core/diag.Server serves on the client's localhost diagnostics endpoint.
 func (t *ClientTunnel) Diagnostics() SessionDiag {
@@ -97,6 +110,7 @@ func (t *ClientTunnel) Diagnostics() SessionDiag {
 	for i, p := range paths {
 		pd[i] = pathDiagOf(p)
 	}
+	sortPathDiagnostics(pd)
 	var bulkPacing *budget.PacerSnapshot
 	if p := t.bulkPacer.Load(); p != nil {
 		snapshot := p.Snapshot()
@@ -157,6 +171,7 @@ func (r *Relay) Diagnostics() RelayDiag {
 			pd = append(pd, pathDiagOf(p))
 		}
 		s.pathsMu.RUnlock()
+		sortPathDiagnostics(pd)
 		out[i] = SessionDiag{
 			SessionIndex: sessionIndexHex(s.sessionIndex),
 			TunnelIP:     s.tunnelIP.String(),
@@ -179,6 +194,7 @@ func (r *Relay) Diagnostics() RelayDiag {
 			},
 		}
 	}
+	sortSessionDiagnostics(out)
 	return RelayDiag{Sessions: out}
 }
 
