@@ -106,9 +106,17 @@ func TestPacerRetriesSchedulerWithoutDoubleSending(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("scheduler retry never delivered packet")
 	}
-	s := p.Snapshot()
-	if s.SchedulerWaits != 2 || s.SentPackets != 1 {
-		t.Fatalf("snapshot = %+v, want two waits and one sent packet", s)
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		s := p.Snapshot()
+		if s.SchedulerWaits == 2 && s.SentPackets == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("snapshot = %+v, want two waits and one sent packet", s)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
