@@ -10,7 +10,70 @@ ARTIFACTS=$(mktemp -d)
 RELAY_PID=""; CLIENT_PID=""; IPERF_PID=""
 
 log() { echo "[soak-churn] $*" >&2; }
-fail() { echo "[soak-churn] FAIL: $*" >&2; exit 1; }
+dump_diagnostics() {
+  log "diagnostics: capturing bounded failure evidence"
+
+  for proc in "relay:${RELAY_PID:-}" "client:${CLIENT_PID:-}" "iperf-server:${IPERF_PID:-}"; do
+    name=${proc%%:*}
+    pid=${proc#*:}
+    if [ -n "$pid" ]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        log "diagnostics: process $name pid=$pid alive"
+      else
+        log "diagnostics: process $name pid=$pid not running"
+      fi
+    fi
+  done
+
+  for file in relay.log client.log iperf.err; do
+    if [ -s "$ARTIFACTS/$file" ]; then
+      log "diagnostics: tail $file"
+      tail -n 80 "$ARTIFACTS/$file" >&2 || true
+    fi
+  done
+
+  if [ -s "$ARTIFACTS/iperf.json" ]; then
+    python3 - "$ARTIFACTS/iperf.json" <<'PY' >&2 || true
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    end = data.get("end", {})
+    received = end.get("sum_received", {})
+    sent = end.get("sum_sent", {})
+    print(
+        "[soak-churn] diagnostics: iperf "
+        f"received_bytes={received.get('bytes', 'unknown')} "
+        f"received_bps={received.get('bits_per_second', 'unknown')} "
+        f"sent_bytes={sent.get('bytes', 'unknown')} "
+        f"retransmits={sent.get('retransmits', 'unknown')}"
+    )
+except Exception as exc:
+    print(f"[soak-churn] diagnostics: unable to summarize iperf JSON: {exc}")
+PY
+  fi
+
+  for nsdev in \
+    "bondify-client:v-cli-wan0" \
+    "bondify-client:v-cli-wan1" \
+    "bondify-relay:v-rel-wan0" \
+    "bondify-relay:v-rel-wan1"; do
+    ns=${nsdev%%:*}
+    dev=${nsdev#*:}
+    if ip netns list 2>/dev/null | awk '{print $1}' | grep -Fxq "$ns"; then
+      log "diagnostics: qdisc $ns/$dev"
+      ip netns exec "$ns" tc -s qdisc show dev "$dev" >&2 2>&1 || true
+    fi
+  done
+}
+fail() {
+  echo "[soak-churn] FAIL: $*" >&2
+  dump_diagnostics
+  exit 1
+}
 cleanup() {
   kill "${RELAY_PID:-}" "${CLIENT_PID:-}" "${IPERF_PID:-}" 2>/dev/null || true
   bash "$TOPO" down 2>/dev/null || true
@@ -89,16 +152,20 @@ for round in $(seq 1 12); do
   if (( round % 4 == 0 )); then
     if (( (round / 4) % 2 == 1 )); then
       dev_c="v-cli-wan0"; dev_r="v-rel-wan0"
+      restore_delay="$d0"; restore_jitter="$j0"; restore_loss="$l0"
     else
       dev_c="v-cli-wan1"; dev_r="v-rel-wan1"
+      restore_delay="$d1"; restore_jitter="$j1"; restore_loss="$l1"
     fi
     log "round $round: hard-dropping $dev_c/$dev_r for 2s"
     ip netns exec bondify-client tc qdisc replace dev "$dev_c" root netem loss 100%
     ip netns exec bondify-relay tc qdisc replace dev "$dev_r" root netem loss 100%
     sleep 2
+    log "round $round: restoring $dev_c/$dev_r after hard drop"
+    ip netns exec bondify-client tc qdisc replace dev "$dev_c" root netem delay "$restore_delay" "$restore_jitter" loss "$restore_loss"
+    ip netns exec bondify-relay tc qdisc replace dev "$dev_r" root netem delay "$restore_delay" "$restore_jitter" loss "$restore_loss"
   fi
   sleep 5
-
 done
 
 wait "$FLOW_PID" || true
