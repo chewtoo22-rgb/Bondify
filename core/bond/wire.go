@@ -7,6 +7,7 @@ package bond
 import (
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -72,19 +73,19 @@ func validateHandshakeResp(p HandshakeRespPayload) error {
 	if p.Prefix < 1 || p.Prefix > 32 {
 		return fmt.Errorf("IPv4 prefix %d out of range", p.Prefix)
 	}
-	tunnelIP := net.ParseIP(p.TunnelIP)
-	if tunnelIP == nil || tunnelIP.To4() == nil {
-		return fmt.Errorf("tunnel ip %q is not IPv4", p.TunnelIP)
+	tunnelIP, err := parseCanonicalIPv4(p.TunnelIP)
+	if err != nil {
+		return fmt.Errorf("tunnel ip %q is not canonical IPv4", p.TunnelIP)
 	}
-	gatewayIP := net.ParseIP(p.GatewayIP)
-	if gatewayIP == nil || gatewayIP.To4() == nil {
-		return fmt.Errorf("gateway ip %q is not IPv4", p.GatewayIP)
+	gatewayIP, err := parseCanonicalIPv4(p.GatewayIP)
+	if err != nil {
+		return fmt.Errorf("gateway ip %q is not canonical IPv4", p.GatewayIP)
 	}
 	if tunnelIP.Equal(gatewayIP) {
 		return fmt.Errorf("tunnel ip must differ from gateway")
 	}
 	mask := net.CIDRMask(p.Prefix, 32)
-	if !tunnelIP.To4().Mask(mask).Equal(gatewayIP.To4().Mask(mask)) {
+	if !tunnelIP.Mask(mask).Equal(gatewayIP.Mask(mask)) {
 		return fmt.Errorf("tunnel ip and gateway are not in the same /%d subnet", p.Prefix)
 	}
 	// For ordinary IPv4 subnets (/30 and larger), neither endpoint may be the subnet's
@@ -106,6 +107,18 @@ func validateHandshakeResp(p HandshakeRespPayload) error {
 		return fmt.Errorf("keepalive must be >= 0")
 	}
 	return nil
+}
+
+// parseCanonicalIPv4 rejects IPv4-mapped IPv6 spellings such as ::ffff:10.77.0.2.
+// The tunnel is currently IPv4-only, so accepting multiple textual address families for
+// the same endpoint creates unnecessary representation ambiguity at the authenticated
+// configuration boundary. netip preserves that distinction while net.IP.To4 does not.
+func parseCanonicalIPv4(s string) (net.IP, error) {
+	addr, err := netip.ParseAddr(s)
+	if err != nil || !addr.Is4() {
+		return nil, fmt.Errorf("not IPv4")
+	}
+	return net.IP(addr.AsSlice()), nil
 }
 
 func ipv4NetworkOrBroadcast(ip net.IP, mask net.IPMask) bool {
