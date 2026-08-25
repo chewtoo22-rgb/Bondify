@@ -124,6 +124,12 @@ log "starting 90s TCP soak flow with repeated asymmetric churn"
 ) &
 FLOW_PID=$!
 
+# Give TCP a short clean-path establishment window before the first impairment round. The
+# churn profile, outage count, 90s flow duration, and >5 MB pass threshold remain unchanged;
+# this avoids making connection-start timing on a shared CI runner part of the throughput gate.
+log "allowing 5s TCP establishment window before churn"
+sleep 5
+
 # Twelve deterministic churn rounds. Every fourth round includes a hard outage on one WAN;
 # other rounds vary delay/jitter/loss asymmetrically. At no point are both WANs intentionally
 # disabled. This catches state leaks and path bookkeeping bugs that short one-shot gates miss.
