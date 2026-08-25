@@ -152,13 +152,18 @@ for round in $(seq 1 12); do
   if (( round % 4 == 0 )); then
     if (( (round / 4) % 2 == 1 )); then
       dev_c="v-cli-wan0"; dev_r="v-rel-wan0"
+      restore_delay="$d0"; restore_jitter="$j0"; restore_loss="$l0"
     else
       dev_c="v-cli-wan1"; dev_r="v-rel-wan1"
+      restore_delay="$d1"; restore_jitter="$j1"; restore_loss="$l1"
     fi
     log "round $round: hard-dropping $dev_c/$dev_r for 2s"
     ip netns exec bondify-client tc qdisc replace dev "$dev_c" root netem loss 100%
     ip netns exec bondify-relay tc qdisc replace dev "$dev_r" root netem loss 100%
     sleep 2
+    log "round $round: restoring $dev_c/$dev_r after hard drop"
+    ip netns exec bondify-client tc qdisc replace dev "$dev_c" root netem delay "$restore_delay" "$restore_jitter" loss "$restore_loss"
+    ip netns exec bondify-relay tc qdisc replace dev "$dev_r" root netem delay "$restore_delay" "$restore_jitter" loss "$restore_loss"
   fi
   sleep 5
 done
