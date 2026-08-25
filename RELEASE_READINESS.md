@@ -7,13 +7,15 @@ This document separates what hosted CI can prove from what must be verified on r
 A release candidate should not ship unless the current commit is green for:
 
 - Core CI: build, vet, lint, race-enabled unit tests, Android app build.
+- Protocol Fuzz.
+- Go Vulnerability Scan (`govulncheck`).
 - Networking regression gates: phases 1, 2, 3, 4, and 7.
 - PairBond gate.
 - PMTU / WAN churn chaos gate.
 - Long-duration Soak Churn gate.
 - Relay Overload / backpressure gate.
 - CodeQL.
-- Release artifact checksum generation.
+- Release artifact checksum generation and provenance attestation.
 
 ## Support bundle
 
