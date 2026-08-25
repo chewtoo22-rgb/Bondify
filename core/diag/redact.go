@@ -57,7 +57,17 @@ func sensitiveField(name string) bool {
 	if name == "session_index" || name == "tunnel_ip" {
 		return true
 	}
-	for _, suffix := range []string{"_ip", "_addr", "_address", "_key", "_token", "_secret", "_password", "_credential"} {
+	// Network identity fields are frequently named by role rather than by the literal
+	// address type. Keep these exact names redacted so future diagnostics cannot leak a
+	// resolver, hostname, peer or endpoint merely because it was not suffixed with _ip.
+	switch name {
+	case "host", "hostname", "endpoint", "peer", "remote", "local", "dns", "resolver":
+		return true
+	}
+	for _, suffix := range []string{
+		"_ip", "_addr", "_address", "_endpoint", "_host", "_hostname", "_dns", "_resolver",
+		"_key", "_token", "_secret", "_password", "_credential",
+	} {
 		if strings.HasSuffix(name, suffix) {
 			return true
 		}
