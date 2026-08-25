@@ -29,6 +29,8 @@ var wireDecMode = func() cbor.DecMode {
 	return dm
 }()
 
+const maxHandshakeDNSServers = 4
+
 // HandshakeRespPayload is carried as the encrypted payload of the Noise IK response
 // message (HANDSHAKE_RESP) — see PROTOCOL.md §5's establishment diagram: "HANDSHAKE_RESP
 // (session idx, cfg)". Bundling cfg_push into the handshake response itself (rather than a
@@ -105,6 +107,24 @@ func validateHandshakeResp(p HandshakeRespPayload) error {
 	}
 	if p.KeepaliveSec < 0 {
 		return fmt.Errorf("keepalive must be >= 0")
+	}
+	// DNS values are authenticated configuration too. Bound the list so a future platform
+	// adapter cannot be handed an unexpectedly large resolver set, and require canonical
+	// IPv4 addresses to match BOND/1's current IPv4-only tunnel contract. Duplicate entries
+	// are rejected so all clients see one deterministic resolver set.
+	if len(p.DNS) > maxHandshakeDNSServers {
+		return fmt.Errorf("too many dns servers: %d (max %d)", len(p.DNS), maxHandshakeDNSServers)
+	}
+	seenDNS := make(map[netip.Addr]struct{}, len(p.DNS))
+	for i, raw := range p.DNS {
+		addr, err := netip.ParseAddr(raw)
+		if err != nil || !addr.Is4() {
+			return fmt.Errorf("dns[%d] %q is not canonical IPv4", i, raw)
+		}
+		if _, exists := seenDNS[addr]; exists {
+			return fmt.Errorf("dns[%d] %q is duplicated", i, raw)
+		}
+		seenDNS[addr] = struct{}{}
 	}
 	return nil
 }
