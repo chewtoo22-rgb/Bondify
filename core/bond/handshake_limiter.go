@@ -2,6 +2,7 @@ package bond
 
 import (
 	"container/list"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -47,20 +48,24 @@ func newHandshakeLimiter(rate, burst float64, maxSources int) *handshakeLimiter 
 	)
 }
 
+func finitePositive(v float64) bool {
+	return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
 func newHandshakeLimiterWithGlobal(rate, burst float64, maxSources int, globalRate, globalBurst float64) *handshakeLimiter {
-	if rate <= 0 {
+	if !finitePositive(rate) {
 		rate = defaultHandshakeRate
 	}
-	if burst <= 0 {
+	if !finitePositive(burst) {
 		burst = defaultHandshakeBurst
 	}
 	if maxSources <= 0 {
 		maxSources = defaultHandshakeMaxSources
 	}
-	if globalRate <= 0 {
+	if !finitePositive(globalRate) {
 		globalRate = defaultHandshakeGlobalRate
 	}
-	if globalBurst <= 0 {
+	if !finitePositive(globalBurst) {
 		globalBurst = defaultHandshakeGlobalBurst
 	}
 	return &handshakeLimiter{
