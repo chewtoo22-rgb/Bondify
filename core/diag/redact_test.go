@@ -51,6 +51,39 @@ func TestRedactSnapshotRemovesSensitiveFieldsRecursively(t *testing.T) {
 	}
 }
 
+func TestRedactSnapshotCoversNetworkIdentityNamingVariants(t *testing.T) {
+	in := map[string]any{
+		"host":            "relay.example.net",
+		"peer_endpoint":   "198.51.100.20:51820",
+		"resolver":        "1.1.1.1",
+		"fallback_dns":    "8.8.8.8",
+		"source_hostname": "work-laptop.local",
+		"remote":          "203.0.113.9:50000",
+		"scheduler":       "round-robin",
+		"tx_packets":      42,
+	}
+
+	got, err := RedactSnapshot(in)
+	if err != nil {
+		t.Fatalf("RedactSnapshot: %v", err)
+	}
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("redacted snapshot type = %T, want map[string]any", got)
+	}
+	for _, key := range []string{"host", "peer_endpoint", "resolver", "fallback_dns", "source_hostname", "remote"} {
+		if m[key] != redactedValue {
+			t.Errorf("%s = %#v, want %q", key, m[key], redactedValue)
+		}
+	}
+	if m["scheduler"] != "round-robin" {
+		t.Errorf("scheduler = %#v, want round-robin", m["scheduler"])
+	}
+	if gotPackets, ok := m["tx_packets"].(json.Number); !ok || gotPackets.String() != "42" {
+		t.Errorf("tx_packets = %#v, want json.Number(42)", m["tx_packets"])
+	}
+}
+
 func TestServerServesRedactedSnapshot(t *testing.T) {
 	s := startTestServer(t, func() any {
 		return sensitiveSnapshot{
