@@ -90,9 +90,14 @@ func (p *IPPool) Allocate() (net.IP, error) {
 }
 
 // Release returns an address previously handed out by Allocate to the pool. Unknown,
-// out-of-range, gateway/broadcast, and duplicate releases are ignored so a cleanup bug
-// cannot poison the free list and cause the same tunnel IP to be leased twice.
+// out-of-range, gateway/broadcast, duplicate, and alternate-address-family releases are
+// ignored so a cleanup bug cannot poison the free list or release a live IPv4 lease through
+// an IPv4-mapped IPv6 alias. Allocate always returns canonical 4-byte IPv4 addresses, so
+// release requires that exact representation too.
 func (p *IPPool) Release(ip net.IP) {
+	if len(ip) != net.IPv4len {
+		return
+	}
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return
