@@ -133,6 +133,54 @@ func TestZeroPathSessionGetsFreshObservedIdleWindow(t *testing.T) {
 	}
 }
 
+func TestZeroPathRecoveryResetsObservedIdleWindow(t *testing.T) {
+	now := time.Now()
+	idle := time.Minute
+	r := makeLifecycleTestRelay(t, "10.77.0.0/29")
+	s := addLifecycleTestSession(t, r, 13, 5, now.Add(-10*idle), sched.StateDead, now.Add(-10*idle))
+	zeroPathSince := make(map[*relaySession]time.Time)
+
+	// First outage starts a grace window.
+	s.paths = map[uint8]*Path{}
+	s.schedPathView.Store([]sched.Path(nil))
+	if got := r.reapIdleSessionsTracked(now, idle, zeroPathSince); got != 0 {
+		t.Fatalf("first zero-path observation reaped=%d, want 0", got)
+	}
+	if _, ok := zeroPathSince[s]; !ok {
+		t.Fatal("first zero-path grace window was not recorded")
+	}
+
+	// The path recovers before the grace expires. That must clear the old zero-path timer,
+	// otherwise a later outage could inherit stale idle time and be reaped prematurely.
+	recovered := NewPath(PathZero, nil)
+	recovered.SetActive()
+	s.paths = map[uint8]*Path{PathZero: recovered}
+	s.schedPathView.Store([]sched.Path{recovered})
+	if got := r.reapIdleSessionsTracked(now.Add(idle/2), idle, zeroPathSince); got != 0 {
+		t.Fatalf("recovered session reaped=%d, want 0", got)
+	}
+	if _, ok := zeroPathSince[s]; ok {
+		t.Fatal("recovered path did not clear stale zero-path grace window")
+	}
+
+	// Losing every path again starts a brand-new grace window at the second outage.
+	secondOutage := now.Add(3 * idle / 4)
+	s.paths = map[uint8]*Path{}
+	s.schedPathView.Store([]sched.Path(nil))
+	if got := r.reapIdleSessionsTracked(secondOutage, idle, zeroPathSince); got != 0 {
+		t.Fatalf("second zero-path observation reaped=%d, want 0", got)
+	}
+	if since := zeroPathSince[s]; !since.Equal(secondOutage) {
+		t.Fatalf("second zero-path grace started at %v, want %v", since, secondOutage)
+	}
+	if got := r.reapIdleSessionsTracked(secondOutage.Add(idle-time.Second), idle, zeroPathSince); got != 0 {
+		t.Fatalf("second outage reaped before fresh grace elapsed: %d", got)
+	}
+	if got := r.reapIdleSessionsTracked(secondOutage.Add(idle), idle, zeroPathSince); got != 1 {
+		t.Fatalf("second outage reaped=%d after fresh grace, want 1", got)
+	}
+}
+
 func TestSessionChurnDoesNotPermanentlyExhaustPool(t *testing.T) {
 	now := time.Now()
 	idle := time.Minute
