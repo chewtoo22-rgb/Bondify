@@ -2,6 +2,7 @@ package bond
 
 import (
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -18,6 +19,53 @@ func TestIPPoolRejectsIPv6AndTooSmallSubnets(t *testing.T) {
 			t.Parallel()
 			if _, err := NewIPPool(cidr); err == nil {
 				t.Fatalf("NewIPPool(%q) succeeded; want rejection", cidr)
+			}
+		})
+	}
+}
+
+func TestIPPoolRejectsCIDRsWithHostBitsSet(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		cidr    string
+		network string
+	}{
+		{cidr: "10.77.0.42/24", network: "10.77.0.0/24"},
+		{cidr: "192.0.2.3/30", network: "192.0.2.0/30"},
+		{cidr: "172.16.7.255/20", network: "172.16.0.0/20"},
+	} {
+		tc := tc
+		t.Run(tc.cidr, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewIPPool(tc.cidr)
+			if err == nil {
+				t.Fatalf("NewIPPool(%q) succeeded; want host-bit rejection", tc.cidr)
+			}
+			if !strings.Contains(err.Error(), "host bits set") || !strings.Contains(err.Error(), tc.network) {
+				t.Fatalf("NewIPPool(%q) error = %q; want host-bit error naming canonical network %s", tc.cidr, err, tc.network)
+			}
+		})
+	}
+}
+
+func TestIPPoolAcceptsCanonicalNetworkCIDRs(t *testing.T) {
+	t.Parallel()
+
+	for _, cidr := range []string{
+		"10.77.0.0/24",
+		"192.0.2.0/30",
+		"172.16.0.0/20",
+	} {
+		cidr := cidr
+		t.Run(cidr, func(t *testing.T) {
+			t.Parallel()
+			pool, err := NewIPPool(cidr)
+			if err != nil {
+				t.Fatalf("NewIPPool(%q): %v", cidr, err)
+			}
+			if got := pool.network.String(); got != cidr {
+				t.Fatalf("pool network = %s; want exact configured network %s", got, cidr)
 			}
 		})
 	}

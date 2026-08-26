@@ -29,7 +29,20 @@ func NewIPPool(cidr string) (*IPPool, error) {
 	if ip4 == nil {
 		return nil, fmt.Errorf("bond: pool cidr %q is not IPv4", cidr)
 	}
-	base := binary.BigEndian.Uint32(network.IP.To4())
+	networkIP4 := network.IP.To4()
+	if networkIP4 == nil {
+		return nil, fmt.Errorf("bond: pool cidr %q is not IPv4", cidr)
+	}
+	// net.ParseCIDR accepts host-address spellings such as 10.77.0.42/24 and silently
+	// normalizes network.IP to 10.77.0.0. A relay configuration should describe the exact
+	// subnet it will serve rather than relying on that implicit rewrite, because the pushed
+	// gateway/prefix and release diagnostics otherwise disagree with the operator's input.
+	// Require the CIDR address itself to be the canonical network address and fail closed on
+	// accidental host bits.
+	if !ip4.Equal(networkIP4) {
+		return nil, fmt.Errorf("bond: pool cidr %q has host bits set (network is %s)", cidr, network.String())
+	}
+	base := binary.BigEndian.Uint32(networkIP4)
 	ones, bits := network.Mask.Size()
 	size := uint32(1) << uint(bits-ones)
 	// We reserve network, gateway, and broadcast, leaving at least one client address.
