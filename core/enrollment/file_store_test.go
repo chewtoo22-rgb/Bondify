@@ -12,7 +12,7 @@ func fileStoreTestDeviceRecord(accountID, deviceID, name string) DeviceRecord {
 	return DeviceRecord{
 		AccountID:  accountID,
 		DeviceID:   deviceID,
-		DeviceName: name,
+		Name:       name,
 		Platform:   PlatformAndroid,
 		EnrolledAt: time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC),
 	}
