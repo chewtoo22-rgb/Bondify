@@ -2,8 +2,10 @@ package diag
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +43,12 @@ func TestServerServesSnapshotJSON(t *testing.T) {
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if cache := resp.Header.Get("Cache-Control"); cache != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cache)
+	}
+	if nosniff := resp.Header.Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", nosniff)
 	}
 	if cors := resp.Header.Get("Access-Control-Allow-Origin"); cors != "" {
 		t.Errorf("CORS header = %q without Origin request header, want empty", cors)
@@ -107,6 +115,9 @@ func TestServerRejectsNonGET(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", resp.StatusCode)
 	}
+	if allow := resp.Header.Get("Allow"); allow != http.MethodGet {
+		t.Errorf("Allow = %q, want GET", allow)
+	}
 }
 
 func TestServerHealthz(t *testing.T) {
@@ -119,6 +130,28 @@ func TestServerHealthz(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if cache := resp.Header.Get("Cache-Control"); cache != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cache)
+	}
+}
+
+func TestServerHealthzRejectsNonGET(t *testing.T) {
+	s := startTestServer(t, func() any { return fakeSnapshot{} })
+	req, err := http.NewRequest(http.MethodPost, "http://"+s.Addr()+"/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /healthz: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+	if allow := resp.Header.Get("Allow"); allow != http.MethodGet {
+		t.Fatalf("Allow = %q, want GET", allow)
 	}
 }
 
@@ -142,6 +175,49 @@ func TestServerSnapshotCalledPerRequest(t *testing.T) {
 		if got.N != want {
 			t.Errorf("request %d: N = %d, want %d", want, got.N, want)
 		}
+	}
+}
+
+func TestServerSnapshotPanicReturnsBoundedError(t *testing.T) {
+	s := startTestServer(t, func() any { panic("boom") })
+	resp, err := http.Get("http://" + s.Addr() + "/api/v1/diagnostics")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "boom") {
+		t.Fatalf("panic detail leaked in response: %q", body)
+	}
+}
+
+func TestServerRejectsOversizedSnapshotBeforeWritingJSON(t *testing.T) {
+	s := startTestServer(t, func() any {
+		return map[string]string{"payload": strings.Repeat("x", maxSnapshotResponseBytes)}
+	})
+	resp, err := http.Get("http://" + s.Addr() + "/api/v1/diagnostics")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) >= maxSnapshotResponseBytes {
+		t.Fatalf("oversized response leaked %d bytes", len(body))
+	}
+	if strings.Contains(string(body), strings.Repeat("x", 64)) {
+		t.Fatal("oversized snapshot content leaked in error response")
 	}
 }
 
