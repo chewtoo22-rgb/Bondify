@@ -155,7 +155,7 @@ func (s *FileDeviceStore) persistLocked() error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("%w: close: %v", ErrDeviceStore, err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := replaceDeviceStoreFile(tmpName, s.path); err != nil {
 		return fmt.Errorf("%w: replace: %v", ErrDeviceStore, err)
 	}
 	return nil
