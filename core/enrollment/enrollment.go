@@ -68,24 +68,19 @@ func (p Platform) Valid() bool {
 }
 
 func NormalizeDeviceName(name string) (string, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", ErrDeviceName
-	}
-
 	var b strings.Builder
 	b.Grow(len(name))
 	lastSpace := false
 	for _, r := range name {
+		if unicode.IsControl(r) && r != '\t' {
+			return "", ErrDeviceName
+		}
 		if unicode.IsSpace(r) {
 			if !lastSpace {
 				b.WriteByte(' ')
 				lastSpace = true
 			}
 			continue
-		}
-		if unicode.IsControl(r) {
-			return "", ErrDeviceName
 		}
 		b.WriteRune(r)
 		lastSpace = false
