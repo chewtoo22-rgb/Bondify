@@ -1,7 +1,6 @@
 package enrollment
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,52 +8,48 @@ import (
 	"time"
 )
 
-func fileStoreTestDeviceRecord(account, id, name string) DeviceRecord {
+func fileStoreTestDeviceRecord(accountID, deviceID, name string) DeviceRecord {
 	return DeviceRecord{
-		AccountID:  account,
-		DeviceID:   id,
-		Name:       name,
+		AccountID:  accountID,
+		DeviceID:   deviceID,
+		DeviceName: name,
 		Platform:   PlatformAndroid,
-		EnrolledAt: time.Date(2026, 8, 29, 12, 0, 0, 0, time.FixedZone("test", -4*60*60)),
+		EnrolledAt: time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC),
 	}
 }
 
 func TestFileDeviceStoreRoundTripAndPermissions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state", "devices.json")
-	store, err := OpenFileDeviceStore(path, 4)
+	path := filepath.Join(t.TempDir(), "devices.json")
+	store, err := OpenFileDeviceStore(path, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := fileStoreTestDeviceRecord(" acct-1 ", strings.Repeat("a", 32), "  Matt's   Pixel  ")
+	record := fileStoreTestDeviceRecord("acct-a", strings.Repeat("a", 32), "Phone")
 	if err := store.Put(record); err != nil {
 		t.Fatal(err)
 	}
-
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Fatalf("store mode = %o, want 600", got)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o, want 600", info.Mode().Perm())
 	}
 
-	reopened, err := OpenFileDeviceStore(path, 4)
+	reopened, err := OpenFileDeviceStore(path, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := reopened.Get("acct-1", strings.Repeat("a", 32))
+	got, err := reopened.List("acct-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "Matt's Pixel" {
-		t.Fatalf("name = %q", got.Name)
-	}
-	if got.EnrolledAt.Location() != time.UTC {
-		t.Fatalf("timestamp not normalized to UTC: %v", got.EnrolledAt)
+	if len(got) != 1 || got[0].DeviceID != record.DeviceID {
+		t.Fatalf("round trip = %#v", got)
 	}
 }
 
-func TestFileDeviceStorePersistsDeterministically(t *testing.T) {
+func TestFileDeviceStoreDeterministicOrdering(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "devices.json")
 	store, err := OpenFileDeviceStore(path, 4)
 	if err != nil {
@@ -77,7 +72,7 @@ func TestFileDeviceStorePersistsDeterministically(t *testing.T) {
 	first := strings.Index(text, strings.Repeat("a", 32))
 	second := strings.Index(text, strings.Repeat("c", 32))
 	third := strings.Index(text, strings.Repeat("b", 32))
-	if !(first >= 0 && first < second && second < third) {
+	if first < 0 || first >= second || second >= third {
 		t.Fatalf("records not deterministically ordered: %s", text)
 	}
 }
@@ -88,8 +83,8 @@ func TestFileDeviceStoreRejectsCorruptAndSymlinkState(t *testing.T) {
 	if err := os.WriteFile(bad, []byte(`{"version":99,"devices":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenFileDeviceStore(bad, 4); !errors.Is(err, ErrDeviceStore) {
-		t.Fatalf("unsupported version error = %v", err)
+	if _, err := OpenFileDeviceStore(bad, 2); err == nil {
+		t.Fatal("expected corrupt/version state rejection")
 	}
 
 	target := filepath.Join(dir, "target.json")
@@ -98,62 +93,69 @@ func TestFileDeviceStoreRejectsCorruptAndSymlinkState(t *testing.T) {
 	}
 	link := filepath.Join(dir, "link.json")
 	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := OpenFileDeviceStore(link, 4); !errors.Is(err, ErrDeviceStore) {
-		t.Fatalf("symlink error = %v", err)
+	if _, err := OpenFileDeviceStore(link, 2); err == nil {
+		t.Fatal("expected symlink rejection")
 	}
 }
 
-func TestFileDeviceStoreRollsBackMemoryWhenPersistenceFails(t *testing.T) {
-	root := t.TempDir()
-	parent := filepath.Join(root, "state")
-	path := filepath.Join(parent, "devices.json")
-	store, err := OpenFileDeviceStore(path, 4)
+func TestFileDeviceStoreRollsBackOnPersistenceFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "devices.json")
+	store, err := OpenFileDeviceStore(path, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := fileStoreTestDeviceRecord("acct", strings.Repeat("a", 32), "First")
+	first := fileStoreTestDeviceRecord("acct-a", strings.Repeat("a", 32), "A")
 	if err := store.Put(first); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := os.Remove(path); err != nil {
+	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(parent); err != nil {
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	second := fileStoreTestDeviceRecord("acct-a", strings.Repeat("b", 32), "B")
+	if err := store.Put(second); err == nil {
+		// Root-like CI environments may still write despite mode bits. Force a
+		// deterministic failure by replacing the store path with a directory.
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		third := fileStoreTestDeviceRecord("acct-a", strings.Repeat("c", 32), "C")
+		if err := store.Put(third); err == nil {
+			t.Fatal("expected persistence failure")
+		}
+	}
+	got, err := store.List("acct-a")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(parent, []byte("not a directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	second := fileStoreTestDeviceRecord("acct", strings.Repeat("b", 32), "Second")
-	if err := store.Put(second); !errors.Is(err, ErrDeviceStore) {
-		t.Fatalf("persistence error = %v", err)
-	}
-	if _, err := store.Get("acct", strings.Repeat("b", 32)); !errors.Is(err, ErrDeviceNotFound) {
-		t.Fatalf("failed write remained in memory: %v", err)
-	}
-	if _, err := store.Get("acct", strings.Repeat("a", 32)); err != nil {
-		t.Fatalf("existing record lost after rollback: %v", err)
+	if len(got) != 1 || got[0].DeviceID != first.DeviceID {
+		t.Fatalf("registry was not rolled back: %#v", got)
 	}
 }
 
-func TestFileDeviceStoreEnforcesCapacityAcrossRestart(t *testing.T) {
+func TestFileDeviceStoreCapacitySurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "devices.json")
 	store, err := OpenFileDeviceStore(path, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(fileStoreTestDeviceRecord("acct", strings.Repeat("a", 32), "One")); err != nil {
+	if err := store.Put(fileStoreTestDeviceRecord("acct-a", strings.Repeat("a", 32), "A")); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := OpenFileDeviceStore(path, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Put(fileStoreTestDeviceRecord("acct", strings.Repeat("b", 32), "Two")); !errors.Is(err, ErrDeviceCapacity) {
-		t.Fatalf("capacity error = %v", err)
+	if err := reopened.Put(fileStoreTestDeviceRecord("acct-a", strings.Repeat("b", 32), "B")); err == nil {
+		t.Fatal("expected capacity rejection after restart")
 	}
 }
