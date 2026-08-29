@@ -1,0 +1,256 @@
+name: Repair PR89 handshake patch
+
+on:
+  push:
+    branches:
+      - fix/relay-handshake-lifecycle
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore main and apply surgical handshake lifecycle patch
+        shell: bash
+        run: |
+          git show origin/main:core/bond/relay.go > core/bond/relay.go
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('core/bond/relay.go')
+          s = p.read_text()
+          old_field = '''\thandshakeLimiter *handshakeLimiter\n\tnewResponder     func(crypto.Keypair) (*crypto.Responder, error)\n'''
+          new_field = '''\thandshakeLimiter *handshakeLimiter\n\t// handshakeLocks serialize authenticated handshakes by client-key stripe. This keeps\n\t// first-client allocation/publication atomic for one identity without holding the main\n\t// relay mutex across Noise response generation or maintaining an attacker-growable map.\n\thandshakeLocks [64]sync.Mutex\n\tnewResponder     func(crypto.Keypair) (*crypto.Responder, error)\n'''
+          if old_field not in s:
+              raise SystemExit('Relay field anchor not found')
+          s = s.replace(old_field, new_field, 1)
+
+          old = '''func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
+\t// Reject excess unauthenticated handshake work before allocating a Noise responder.
+\t// The limiter combines a per-source bucket with a global bucket, so both a single
+\t// abusive address and source-rotation/spoofing attacks are bounded.
+\tif src == nil || r.handshakeLimiter == nil || !r.handshakeLimiter.allow(src.IP, time.Now()) {
+\t\treturn
+\t}
+\tresponderFactory := r.newResponder
+\tif responderFactory == nil {
+\t\tresponderFactory = crypto.NewResponder
+\t}
+\tresponder, err := responderFactory(r.cfg.RelayKey)
+\tif err != nil {
+\t\tlog.Printf("bond: new responder: %v", err)
+\t\treturn
+\t}
+\t_, clientKey, err := responder.ReadInit(msg)
+\tif err != nil {
+\t\t// Authentication/parse failure: silently drop, never respond, never log at a
+\t\t// rate an attacker could use as an oracle (PROTOCOL.md §3).
+\t\treturn
+\t}
+
+\tr.mu.Lock()
+\texisting := r.byClientKey[clientKey]
+\tr.mu.Unlock()
+
+\tvar tunnelIP net.IP
+\tvar sessionIndex uint32
+\tallocated := false
+\tif existing != nil {
+\t\ttunnelIP = existing.tunnelIP
+\t\tsessionIndex = existing.sessionIndex
+\t} else {
+\t\tip, err := r.pool.Allocate()
+\t\tif err != nil {
+\t\t\tlog.Printf("bond: relay ip pool exhausted: %v", err)
+\t\t\treturn
+\t\t}
+\t\ttunnelIP = ip
+\t\tsessionIndex = r.newSessionIndex()
+\t\tallocated = true
+\t}
+
+\tpayload, err := HandshakeRespPayload{
+\t\tSessionIndex: sessionIndex,
+\t\tTunnelIP:     tunnelIP.String(),
+\t\tPrefix:       r.pool.Prefix(),
+\t\tGatewayIP:    r.pool.Gateway().String(),
+\t\tDNS:          r.cfg.DNS,
+\t\tMTU:          r.cfg.MTU,
+\t\tKeepaliveSec: r.cfg.KeepAlive,
+\t}.Marshal()
+\tif err != nil {
+\t\tlog.Printf("bond: marshal cfg_push: %v", err)
+\t\treturn
+\t}
+
+\trespMsg, sess, err := responder.WriteResponse(payload)
+\tif err != nil {
+\t\tlog.Printf("bond: write handshake response: %v", err)
+\t\treturn
+\t}
+
+\trs, err := newRelaySession(r, sessionIndex, sess, tunnelIP, r.cfg)
+\tif err != nil {
+\t\tlog.Printf("bond: create relay session: %v", err)
+\t\tif allocated {
+\t\t\tr.pool.Release(tunnelIP)
+\t\t}
+\t\treturn
+\t}
+\tp0, _ := rs.getOrCreatePath(PathZero, src)
+\tp0.SetActive()
+
+\tr.mu.Lock()
+\tr.byIndex[sessionIndex] = rs
+\tr.byTunnelIP[tunnelIP.String()] = rs
+\tr.byClientKey[clientKey] = rs
+\tr.mu.Unlock()
+\tif existing != nil {
+\t\tif existing.bulkPacer != nil {
+\t\t\texisting.bulkPacer.Close()
+\t\t}
+\t}
+
+\tout := make([]byte, proto.OuterPrefixLen+len(respMsg))
+\tif err := proto.MarshalOuter(out, proto.OuterHeader{Type: proto.TypeHandshakeResp, Version: proto.Version, SessionIndex: sessionIndex}); err != nil {
+\t\tlog.Printf("bond: marshal handshake resp outer: %v", err)
+\t\treturn
+\t}
+\tcopy(out[proto.OuterPrefixLen:], respMsg)
+\tif _, err := r.conn.WriteToUDP(out, src); err != nil {
+\t\tlog.Printf("bond: send handshake response: %v", err)
+\t}
+\tlog.Printf("bond: session %08x established, tunnel ip %s, client %s", sessionIndex, tunnelIP, src)
+}
+'''
+          new = '''func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
+\t// Reject excess unauthenticated handshake work before allocating a Noise responder.
+\t// The limiter combines a per-source bucket with a global bucket, so both a single
+\t// abusive address and source-rotation/spoofing attacks are bounded.
+\tif src == nil || r.handshakeLimiter == nil || !r.handshakeLimiter.allow(src.IP, time.Now()) {
+\t\treturn
+\t}
+\tresponderFactory := r.newResponder
+\tif responderFactory == nil {
+\t\tresponderFactory = crypto.NewResponder
+\t}
+\tresponder, err := responderFactory(r.cfg.RelayKey)
+\tif err != nil {
+\t\tlog.Printf("bond: new responder: %v", err)
+\t\treturn
+\t}
+\t_, clientKey, err := responder.ReadInit(msg)
+\tif err != nil {
+\t\t// Authentication/parse failure: silently drop, never respond, never log at a
+\t\t// rate an attacker could use as an oracle (PROTOCOL.md §3).
+\t\treturn
+\t}
+
+\t// Serialize lookup through publication for this authenticated client identity without
+\t// holding r.mu across Noise response generation. A fixed stripe array stays bounded
+\t// even if an attacker rotates authenticated keys.
+\tstripe := &r.handshakeLocks[int(clientKey[0])%len(r.handshakeLocks)]
+\tstripe.Lock()
+\tdefer stripe.Unlock()
+
+\tr.mu.RLock()
+\texisting := r.byClientKey[clientKey]
+\tr.mu.RUnlock()
+
+\tvar tunnelIP net.IP
+\tvar sessionIndex uint32
+\tallocated := false
+\tpublished := false
+\tdefer func() {
+\t\tif allocated && !published {
+\t\t\tr.pool.Release(tunnelIP)
+\t\t}
+\t}()
+\tif existing != nil {
+\t\ttunnelIP = existing.tunnelIP
+\t\tsessionIndex = existing.sessionIndex
+\t} else {
+\t\tip, err := r.pool.Allocate()
+\t\tif err != nil {
+\t\t\tlog.Printf("bond: relay ip pool exhausted: %v", err)
+\t\t\treturn
+\t\t}
+\t\ttunnelIP = ip
+\t\tsessionIndex = r.newSessionIndex()
+\t\tallocated = true
+\t}
+
+\tpayload, err := HandshakeRespPayload{
+\t\tSessionIndex: sessionIndex,
+\t\tTunnelIP:     tunnelIP.String(),
+\t\tPrefix:       r.pool.Prefix(),
+\t\tGatewayIP:    r.pool.Gateway().String(),
+\t\tDNS:          r.cfg.DNS,
+\t\tMTU:          r.cfg.MTU,
+\t\tKeepaliveSec: r.cfg.KeepAlive,
+\t}.Marshal()
+\tif err != nil {
+\t\tlog.Printf("bond: marshal cfg_push: %v", err)
+\t\treturn
+\t}
+
+\trespMsg, sess, err := responder.WriteResponse(payload)
+\tif err != nil {
+\t\tlog.Printf("bond: write handshake response: %v", err)
+\t\treturn
+\t}
+
+\trs, err := newRelaySession(r, sessionIndex, sess, tunnelIP, r.cfg)
+\tif err != nil {
+\t\tlog.Printf("bond: create relay session: %v", err)
+\t\treturn
+\t}
+\tp0, _ := rs.getOrCreatePath(PathZero, src)
+\tp0.SetActive()
+
+\tr.mu.Lock()
+\tr.byIndex[sessionIndex] = rs
+\tr.byTunnelIP[tunnelIP.String()] = rs
+\tr.byClientKey[clientKey] = rs
+\tr.mu.Unlock()
+\tpublished = true
+\tif existing != nil {
+\t\tif existing.bulkPacer != nil {
+\t\t\texisting.bulkPacer.Close()
+\t\t}
+\t}
+
+\tout := make([]byte, proto.OuterPrefixLen+len(respMsg))
+\tif err := proto.MarshalOuter(out, proto.OuterHeader{Type: proto.TypeHandshakeResp, Version: proto.Version, SessionIndex: sessionIndex}); err != nil {
+\t\tlog.Printf("bond: marshal handshake resp outer: %v", err)
+\t\treturn
+\t}
+\tcopy(out[proto.OuterPrefixLen:], respMsg)
+\tif _, err := r.conn.WriteToUDP(out, src); err != nil {
+\t\tlog.Printf("bond: send handshake response: %v", err)
+\t}
+\tlog.Printf("bond: session %08x established, tunnel ip %s, client %s", sessionIndex, tunnelIP, src)
+}
+'''
+          if old not in s:
+              raise SystemExit('handleHandshakeInit anchor not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          gofmt -w core/bond/relay.go
+          rm .github/workflows/repair-pr89.yml
+          git diff --check
+          git diff --stat origin/main -- core/bond/relay.go
+      - name: Commit surgical patch
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add core/bond/relay.go .github/workflows/repair-pr89.yml
+          git commit -m "fix: keep relay handshake lifecycle patch surgical"
+          git push origin HEAD:fix/relay-handshake-lifecycle
