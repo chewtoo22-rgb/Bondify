@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const maxSnapshotResponseBytes = 1 << 20 // 1 MiB; diagnostics are bounded operational state, not bulk data.
+
 // Snapshot is called once per request to produce the current diagnostics payload. Callers
 // pass a closure over *bond.ClientTunnel.Diagnostics or *bond.Relay.Diagnostics -- this
 // package deliberately has no dependency on core/bond, so it stays reusable for any future
@@ -56,6 +58,7 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/diagnostics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -64,29 +67,44 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 		// loopback; wildcard CORS would turn the local diagnostics endpoint into a cross-origin
 		// exfiltration primitive.
 		setLoopbackCORS(w, r)
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(snap()); err != nil {
-			log.Printf("diag: encode snapshot: %v", err)
+		value, err := safeSnapshot(snap)
+		if err != nil {
+			log.Printf("diag: snapshot: %v", err)
+			http.Error(w, "diagnostics unavailable", http.StatusInternalServerError)
+			return
 		}
+		writeSnapshotJSON(w, value)
 	})
 	mux.HandleFunc("/api/v1/diagnostics/redacted", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		redacted, err := RedactSnapshot(snap())
+		value, err := safeSnapshot(snap)
+		if err != nil {
+			log.Printf("diag: snapshot for redaction: %v", err)
+			http.Error(w, "diagnostics unavailable", http.StatusInternalServerError)
+			return
+		}
+		redacted, err := RedactSnapshot(value)
 		if err != nil {
 			log.Printf("diag: redact snapshot: %v", err)
 			http.Error(w, "diagnostics redaction failed", http.StatusInternalServerError)
 			return
 		}
 		setLoopbackCORS(w, r)
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(redacted); err != nil {
-			log.Printf("diag: encode redacted snapshot: %v", err)
-		}
+		writeSnapshotJSON(w, redacted)
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -98,6 +116,47 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 		},
 		ln: ln,
 	}, nil
+}
+
+func safeSnapshot(snap Snapshot) (value any, err error) {
+	if snap == nil {
+		return nil, fmt.Errorf("nil snapshot provider")
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("snapshot provider panic: %v", recovered)
+			value = nil
+		}
+	}()
+	return snap(), nil
+}
+
+func writeSnapshotJSON(w http.ResponseWriter, value any) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		log.Printf("diag: encode snapshot: %v", err)
+		http.Error(w, "diagnostics encoding failed", http.StatusInternalServerError)
+		return
+	}
+	// Reject unexpectedly large snapshots before writing any JSON. A partial response is both
+	// difficult for clients to reason about and an easy way for a bad diagnostics source to
+	// turn this tiny localhost endpoint into an accidental bulk-data server.
+	if len(payload)+1 > maxSnapshotResponseBytes {
+		log.Printf("diag: snapshot response too large: %d bytes", len(payload)+1)
+		http.Error(w, "diagnostics snapshot too large", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(payload); err != nil {
+		log.Printf("diag: write snapshot: %v", err)
+		return
+	}
+	if _, err := w.Write([]byte("\n")); err != nil {
+		log.Printf("diag: terminate snapshot response: %v", err)
+	}
 }
 
 func setLoopbackCORS(w http.ResponseWriter, r *http.Request) {
