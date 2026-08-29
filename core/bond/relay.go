@@ -213,15 +213,16 @@ type Relay struct {
 	dev  tun.Device
 	pool *IPPool
 
-	mu               sync.RWMutex
-	byIndex          map[uint32]*relaySession
-	byTunnelIP       map[string]*relaySession
-	byClientKey      map[[crypto.KeyLen]byte]*relaySession
-	handshakeLimiter *handshakeLimiter
-	newResponder     func(crypto.Keypair) (*crypto.Responder, error)
-	pacingCtx        context.Context
-	pacingCancel     context.CancelFunc
-	closeOnce        sync.Once
+	mu                   sync.RWMutex
+	byIndex              map[uint32]*relaySession
+	byTunnelIP           map[string]*relaySession
+	byClientKey          map[[crypto.KeyLen]byte]*relaySession
+	handshakeLimiter     *handshakeLimiter
+	clientHandshakeLocks handshakeClientLocks
+	newResponder         func(crypto.Keypair) (*crypto.Responder, error)
+	pacingCtx            context.Context
+	pacingCancel         context.CancelFunc
+	closeOnce            sync.Once
 
 	Stats Stats
 }
@@ -802,25 +803,31 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 		return
 	}
 
-	r.mu.Lock()
+	// Serialize the authenticated lifecycle for this client identity. Different clients
+	// still proceed independently through the bounded stripe table, while duplicate first
+	// handshakes cannot race allocation/publication and strand an IP or session.
+	unlockClient := r.clientHandshakeLocks.lock(clientKey)
+	defer unlockClient()
+
+	r.mu.RLock()
 	existing := r.byClientKey[clientKey]
-	r.mu.Unlock()
+	r.mu.RUnlock()
 
 	var tunnelIP net.IP
 	var sessionIndex uint32
-	allocated := false
+	var lease *handshakeLease
 	if existing != nil {
 		tunnelIP = existing.tunnelIP
 		sessionIndex = existing.sessionIndex
 	} else {
-		ip, err := r.pool.Allocate()
+		lease, err = allocateHandshakeLease(r.pool)
 		if err != nil {
 			log.Printf("bond: relay ip pool exhausted: %v", err)
 			return
 		}
-		tunnelIP = ip
+		defer lease.Release()
+		tunnelIP = lease.IP()
 		sessionIndex = r.newSessionIndex()
-		allocated = true
 	}
 
 	payload, err := HandshakeRespPayload{
@@ -846,9 +853,6 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 	rs, err := newRelaySession(r, sessionIndex, sess, tunnelIP, r.cfg)
 	if err != nil {
 		log.Printf("bond: create relay session: %v", err)
-		if allocated {
-			r.pool.Release(tunnelIP)
-		}
 		return
 	}
 	p0, _ := rs.getOrCreatePath(PathZero, src)
@@ -858,6 +862,11 @@ func (r *Relay) handleHandshakeInit(msg []byte, src *net.UDPAddr) {
 	r.byIndex[sessionIndex] = rs
 	r.byTunnelIP[tunnelIP.String()] = rs
 	r.byClientKey[clientKey] = rs
+	if lease != nil {
+		// All live lookup maps now agree on the new session. Transfer the fresh address
+		// from temporary handshake ownership to the published session before unlocking.
+		lease.Publish()
+	}
 	r.mu.Unlock()
 	if existing != nil {
 		if existing.bulkPacer != nil {
