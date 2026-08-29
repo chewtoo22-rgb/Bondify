@@ -1,0 +1,60 @@
+name: Windows Native Smoke
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-native-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Run Windows-sensitive package tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          go test ./desktop/... ./core/tun/... -count=1
+      - name: Build native Windows client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go build -trimpath -o dist/bondify.exe ./desktop/cmd/bondify
+          if (-not (Test-Path dist/bondify.exe)) { throw 'bondify.exe was not produced' }
+      - name: Exercise native CLI startup boundary
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $help = & .\dist\bondify.exe -h 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "bondify.exe -h exited $LASTEXITCODE" }
+          if ($help -notmatch '-relay') { throw 'native CLI help is missing the relay option' }
+          if ($help -notmatch '-local-addrs') { throw 'native CLI help is missing multi-interface configuration' }
+      - name: Validate Windows installer script parses
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'desktop/windows/install.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            throw 'install.ps1 failed PowerShell parser validation'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bondify-windows-native-smoke
+          path: dist/bondify.exe
+          if-no-files-found: error
