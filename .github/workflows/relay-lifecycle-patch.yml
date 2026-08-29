@@ -1,0 +1,152 @@
+name: One-shot relay handshake lifecycle patch
+
+on:
+  push:
+    branches:
+      - fix/relay-handshake-lifecycle-mainline
+    paths:
+      - .github/workflows/relay-lifecycle-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/relay-handshake-lifecycle-mainline
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Apply bounded lifecycle integration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('core/bond/relay.go')
+          src = path.read_text()
+
+          replacements = []
+
+          old = '''\tbyClientKey      map[[crypto.KeyLen]byte]*relaySession
+\thandshakeLimiter *handshakeLimiter
+\tnewResponder     func(crypto.Keypair) (*crypto.Responder, error)
+'''
+          new = '''\tbyClientKey         map[[crypto.KeyLen]byte]*relaySession
+\thandshakeLimiter    *handshakeLimiter
+\tclientHandshakeLocks handshakeClientLocks
+\tnewResponder        func(crypto.Keypair) (*crypto.Responder, error)
+'''
+          replacements.append((old, new, 'Relay handshake lock field'))
+
+          old = '''\tr.mu.Lock()
+\texisting := r.byClientKey[clientKey]
+\tr.mu.Unlock()
+
+\tvar tunnelIP net.IP
+\tvar sessionIndex uint32
+\tallocated := false
+\tif existing != nil {
+\t\ttunnelIP = existing.tunnelIP
+\t\tsessionIndex = existing.sessionIndex
+\t} else {
+\t\tip, err := r.pool.Allocate()
+\t\tif err != nil {
+\t\t\tlog.Printf("bond: relay ip pool exhausted: %v", err)
+\t\t\treturn
+\t\t}
+\t\ttunnelIP = ip
+\t\tsessionIndex = r.newSessionIndex()
+\t\tallocated = true
+\t}
+'''
+          new = '''\t// Serialize the authenticated lifecycle for this client identity. Different clients
+\t// still proceed independently through the bounded stripe table, while duplicate first
+\t// handshakes cannot race allocation/publication and strand an IP or session.
+\tunlockClient := r.clientHandshakeLocks.lock(clientKey)
+\tdefer unlockClient()
+
+\tr.mu.RLock()
+\texisting := r.byClientKey[clientKey]
+\tr.mu.RUnlock()
+
+\tvar tunnelIP net.IP
+\tvar sessionIndex uint32
+\tvar lease *handshakeLease
+\tif existing != nil {
+\t\ttunnelIP = existing.tunnelIP
+\t\tsessionIndex = existing.sessionIndex
+\t} else {
+\t\tlease, err = allocateHandshakeLease(r.pool)
+\t\tif err != nil {
+\t\t\tlog.Printf("bond: relay ip pool exhausted: %v", err)
+\t\t\treturn
+\t\t}
+\t\tdefer lease.Release()
+\t\ttunnelIP = lease.IP()
+\t\tsessionIndex = r.newSessionIndex()
+\t}
+'''
+          replacements.append((old, new, 'serialized lookup and leased allocation'))
+
+          old = '''\trs, err := newRelaySession(r, sessionIndex, sess, tunnelIP, r.cfg)
+\tif err != nil {
+\t\tlog.Printf("bond: create relay session: %v", err)
+\t\tif allocated {
+\t\t\tr.pool.Release(tunnelIP)
+\t\t}
+\t\treturn
+\t}
+'''
+          new = '''\trs, err := newRelaySession(r, sessionIndex, sess, tunnelIP, r.cfg)
+\tif err != nil {
+\t\tlog.Printf("bond: create relay session: %v", err)
+\t\treturn
+\t}
+'''
+          replacements.append((old, new, 'deferred lease cleanup'))
+
+          old = '''\tr.mu.Lock()
+\tr.byIndex[sessionIndex] = rs
+\tr.byTunnelIP[tunnelIP.String()] = rs
+\tr.byClientKey[clientKey] = rs
+\tr.mu.Unlock()
+'''
+          new = '''\tr.mu.Lock()
+\tr.byIndex[sessionIndex] = rs
+\tr.byTunnelIP[tunnelIP.String()] = rs
+\tr.byClientKey[clientKey] = rs
+\tif lease != nil {
+\t\t// All live lookup maps now agree on the new session. Transfer the fresh address
+\t\t// from temporary handshake ownership to the published session before unlocking.
+\t\tlease.Publish()
+\t}
+\tr.mu.Unlock()
+'''
+          replacements.append((old, new, 'atomic lease publication'))
+
+          for old, new, label in replacements:
+              count = src.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly one match, got {count}')
+              src = src.replace(old, new, 1)
+
+          path.write_text(src)
+          PY
+          gofmt -w core/bond/relay.go
+      - name: Validate relay package
+        run: go test ./core/bond -race -count=1
+      - name: Commit validated patch and remove one-shot workflow
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add core/bond/relay.go
+          git rm .github/workflows/relay-lifecycle-patch.yml
+          git commit -m "fix: integrate serialized handshake lease lifecycle"
+          git push origin HEAD:fix/relay-handshake-lifecycle-mainline
