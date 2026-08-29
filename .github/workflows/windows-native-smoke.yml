@@ -38,21 +38,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "bondify.exe -h exited $LASTEXITCODE" }
           if ($help -notmatch '-relay') { throw 'native CLI help is missing the relay option' }
           if ($help -notmatch '-local-addrs') { throw 'native CLI help is missing multi-interface configuration' }
-      - name: Validate Windows installer script parses
+      - name: Validate Windows installer fail-closed contract
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $tokens = $null
-          $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'desktop/windows/install.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          )
-          if ($errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            throw 'install.ps1 failed PowerShell parser validation'
-          }
+          .\desktop\windows\test-install-contract.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: bondify-windows-native-smoke
