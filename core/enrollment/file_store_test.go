@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func testDeviceRecord(account, id, name string) DeviceRecord {
+func fileStoreTestDeviceRecord(account, id, name string) DeviceRecord {
 	return DeviceRecord{
 		AccountID:  account,
 		DeviceID:   id,
@@ -25,7 +25,7 @@ func TestFileDeviceStoreRoundTripAndPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := testDeviceRecord(" acct-1 ", strings.Repeat("a", 32), "  Matt's   Pixel  ")
+	record := fileStoreTestDeviceRecord(" acct-1 ", strings.Repeat("a", 32), "  Matt's   Pixel  ")
 	if err := store.Put(record); err != nil {
 		t.Fatal(err)
 	}
@@ -61,9 +61,9 @@ func TestFileDeviceStorePersistsDeterministically(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, record := range []DeviceRecord{
-		testDeviceRecord("acct-b", strings.Repeat("b", 32), "B"),
-		testDeviceRecord("acct-a", strings.Repeat("c", 32), "C"),
-		testDeviceRecord("acct-a", strings.Repeat("a", 32), "A"),
+		fileStoreTestDeviceRecord("acct-b", strings.Repeat("b", 32), "B"),
+		fileStoreTestDeviceRecord("acct-a", strings.Repeat("c", 32), "C"),
+		fileStoreTestDeviceRecord("acct-a", strings.Repeat("a", 32), "A"),
 	} {
 		if err := store.Put(record); err != nil {
 			t.Fatal(err)
@@ -113,7 +113,7 @@ func TestFileDeviceStoreRollsBackMemoryWhenPersistenceFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := testDeviceRecord("acct", strings.Repeat("a", 32), "First")
+	first := fileStoreTestDeviceRecord("acct", strings.Repeat("a", 32), "First")
 	if err := store.Put(first); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestFileDeviceStoreRollsBackMemoryWhenPersistenceFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second := testDeviceRecord("acct", strings.Repeat("b", 32), "Second")
+	second := fileStoreTestDeviceRecord("acct", strings.Repeat("b", 32), "Second")
 	if err := store.Put(second); !errors.Is(err, ErrDeviceStore) {
 		t.Fatalf("persistence error = %v", err)
 	}
@@ -146,14 +146,14 @@ func TestFileDeviceStoreEnforcesCapacityAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(testDeviceRecord("acct", strings.Repeat("a", 32), "One")); err != nil {
+	if err := store.Put(fileStoreTestDeviceRecord("acct", strings.Repeat("a", 32), "One")); err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := OpenFileDeviceStore(path, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reopened.Put(testDeviceRecord("acct", strings.Repeat("b", 32), "Two")); !errors.Is(err, ErrDeviceCapacity) {
+	if err := reopened.Put(fileStoreTestDeviceRecord("acct", strings.Repeat("b", 32), "Two")); !errors.Is(err, ErrDeviceCapacity) {
 		t.Fatalf("capacity error = %v", err)
 	}
 }
