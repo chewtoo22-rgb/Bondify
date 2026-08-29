@@ -39,13 +39,19 @@ func NewDeviceRegistry(maxDevices int) (*DeviceRegistry, error) {
 // account is idempotent and refreshes its user-visible metadata. New devices
 // are rejected once the per-account bound is reached.
 func (r *DeviceRegistry) Put(record DeviceRecord) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.putLocked(record)
+}
+
+// putLocked applies a validated mutation while the caller owns r.mu. Keeping
+// this primitive internal lets durable stores make registry + persistence a
+// single transaction without recursively acquiring the same mutex.
+func (r *DeviceRegistry) putLocked(record DeviceRecord) error {
 	normalized, err := normalizeDeviceRecord(record)
 	if err != nil {
 		return err
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	devices := r.accounts[normalized.AccountID]
 	if devices == nil {
@@ -95,13 +101,19 @@ func (r *DeviceRegistry) List(accountID string) ([]DeviceRecord, error) {
 }
 
 func (r *DeviceRegistry) Remove(accountID, deviceID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.removeLocked(accountID, deviceID)
+}
+
+// removeLocked applies a validated removal while the caller owns r.mu. It is
+// paired with putLocked for transactional durable-store mutations.
+func (r *DeviceRegistry) removeLocked(accountID, deviceID string) error {
 	accountID, err := normalizeAccountID(accountID)
 	if err != nil || !validDeviceID(deviceID) {
 		return ErrDeviceRecord
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	devices := r.accounts[accountID]
 	if _, ok := devices[deviceID]; !ok {
 		return ErrDeviceNotFound
