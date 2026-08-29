@@ -113,6 +113,15 @@ func (s *ClaimStore) Issue(accountID string, secret []byte) (EnrollmentClaim, er
 }
 
 func (s *ClaimStore) Consume(accountID, claimID string, secret []byte) error {
+	return s.ConsumeAndCommit(accountID, claimID, secret, nil)
+}
+
+// ConsumeAndCommit validates exclusive ownership of a one-time claim, executes
+// commit while that claim is reserved, and deletes the claim only after commit
+// succeeds. A failed durable write therefore does not burn a valid enrollment
+// claim. commit must be bounded local work; callers must not perform network I/O
+// while the claim-store lock is held.
+func (s *ClaimStore) ConsumeAndCommit(accountID, claimID string, secret []byte, commit func() error) error {
 	accountID, err := normalizeAccountID(accountID)
 	if err != nil || !validClaimID(claimID) || len(secret) < MinClaimSecretBytes || len(secret) > MaxClaimSecretBytes {
 		return ErrClaimInvalid
@@ -131,6 +140,12 @@ func (s *ClaimStore) Consume(accountID, claimID string, secret []byte) error {
 	providedHash := sha256.Sum256(secret)
 	if subtle.ConstantTimeCompare(providedHash[:], record.secretHash[:]) != 1 {
 		return ErrClaimInvalid
+	}
+
+	if commit != nil {
+		if err := commit(); err != nil {
+			return err
+		}
 	}
 
 	delete(s.claims, claimID)
