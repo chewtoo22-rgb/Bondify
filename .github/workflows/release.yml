@@ -17,16 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Require release tag commit to come from main
         if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          set -euo pipefail
-          # Peel annotated tags to their commit before checking ancestry. Publishing a tag
-          # that points at an unmerged feature/security-bypass commit must fail closed.
-          TAG_COMMIT=$(git rev-parse "${GITHUB_SHA}^{commit}")
-          git fetch --no-tags --depth=1 origin main
-          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
-            echo "Refusing release: tag commit $TAG_COMMIT is not contained in origin/main." >&2
-            exit 1
-          fi
+        run: bash qa/verify-release-tag-ancestry.sh "${GITHUB_SHA}"
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
