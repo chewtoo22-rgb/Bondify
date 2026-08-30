@@ -57,3 +57,52 @@ func TestRelayPathAddBindsPayloadIDToAuthenticatedPathID(t *testing.T) {
 		t.Fatalf("path 1 remote = %v, want %v", got, src)
 	}
 }
+
+func TestRelayPathAddReregistrationRefreshesAuthenticatedEndpoint(t *testing.T) {
+	r, relayKP := mustRelay(t)
+	tun, sessionIndex := mustClientTunnel(t, r, relayKP)
+
+	sess := relaySessionFor(r, sessionIndex)
+	if sess == nil {
+		t.Fatal("relay session missing after handshake")
+	}
+
+	pathID := uint8(3)
+	payload, err := marshalCBOR(PathAddPayload{PathID: pathID})
+	if err != nil {
+		t.Fatalf("marshal path add: %v", err)
+	}
+
+	firstSrc := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 32001}
+	first, err := sealControl(tun.sess, proto.TypePathAdd, sessionIndex, pathID, payload)
+	if err != nil {
+		t.Fatalf("seal first path add: %v", err)
+	}
+	r.handleUDP(first, firstSrc)
+
+	p := sess.pathByID(pathID)
+	if p == nil {
+		t.Fatal("first PATH_ADD did not create path")
+	}
+	if got := p.RemoteAddr(); got == nil || !udpAddrEqual(got, firstSrc) {
+		t.Fatalf("first remote = %v, want %v", got, firstSrc)
+	}
+
+	// Re-register the same authenticated PathID from a new UDP source. Android network
+	// callbacks and NAT churn can produce this exact sequence before a probe/data packet is
+	// available. The PATH_ADD ACK is proof that the relay accepted the new source, so return
+	// traffic must immediately follow it rather than continue targeting the stale endpoint.
+	secondSrc := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 32002}
+	second, err := sealControl(tun.sess, proto.TypePathAdd, sessionIndex, pathID, payload)
+	if err != nil {
+		t.Fatalf("seal second path add: %v", err)
+	}
+	r.handleUDP(second, secondSrc)
+
+	if got := p.RemoteAddr(); got == nil || !udpAddrEqual(got, secondSrc) {
+		t.Fatalf("re-registered remote = %v, want %v", got, secondSrc)
+	}
+	if current := sess.pathByID(pathID); current != p {
+		t.Fatal("re-registration replaced path object instead of refreshing endpoint")
+	}
+}
