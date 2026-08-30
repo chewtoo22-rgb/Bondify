@@ -14,13 +14,16 @@ if ! git rev-parse --verify "${candidate}^{commit}" >/dev/null 2>&1; then
   exit 1
 fi
 
-# checkout@v4 normally leaves a shallow repository. Hydrate the complete main
-# ancestry into the exact remote-tracking ref we verify. An explicit refspec
-# avoids relying on the checkout's remote fetch configuration, while the very
-# large depth works for both shallow and already-complete repositories without
-# the brittle --unshallow state transition.
-git fetch --no-tags --prune --depth=2147483647 origin \
-  '+refs/heads/main:refs/remotes/origin/main'
+# checkout@v4 normally leaves a shallow repository. Hydrate main through an
+# explicit refspec so verification does not depend on checkout's narrow fetch
+# configuration. Only request --unshallow while Git says the repository is
+# shallow; repeating --unshallow after the first verification is an error.
+main_refspec='+refs/heads/main:refs/remotes/origin/main'
+if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+  git fetch --no-tags --prune --unshallow origin "$main_refspec"
+else
+  git fetch --no-tags --prune origin "$main_refspec"
+fi
 
 if ! git rev-parse --verify "${main_ref}^{commit}" >/dev/null 2>&1; then
   echo "Refusing release: main ref '$main_ref' does not resolve to a commit." >&2
