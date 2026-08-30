@@ -40,57 +40,62 @@ if (-not $isAdmin) {
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"",
         "-RelayAddr", "`"$RelayAddr`"", "-RelayPubKey", "`"$RelayPubKey`"", "-InstallDir", "`"$InstallDir`""
     )
-    Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -Wait
-    exit $LASTEXITCODE
+    $elevated = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -Wait -PassThru
+    exit $elevated.ExitCode
 }
 
 # --- Install files -------------------------------------------------------------------------
 # bondify.exe ships alongside this script in a release archive (built via
 # `GOOS=windows GOARCH=amd64 go build ./desktop/cmd/bondify`); this installer places files,
-# it does not build them -- Bondify has no packaged release yet (phase 9 scope).
+# it does not build them.
 $scriptDir = Split-Path -Parent $PSCommandPath
 $exeSrc = Join-Path $scriptDir "bondify.exe"
-if (-not (Test-Path $exeSrc)) {
-    Write-Error "bondify.exe not found next to install.ps1 (expected at $exeSrc). Build it first: GOOS=windows GOARCH=amd64 go build -o bondify.exe ./desktop/cmd/bondify"
-    exit 1
+if (-not (Test-Path -LiteralPath $exeSrc -PathType Leaf)) {
+    throw "bondify.exe not found next to install.ps1 (expected at $exeSrc)."
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Copy-Item -Force $exeSrc (Join-Path $InstallDir "bondify.exe")
+Copy-Item -Force -LiteralPath $exeSrc -Destination (Join-Path $InstallDir "bondify.exe")
 
 $wintunDst = Join-Path $InstallDir "wintun.dll"
-if (-not (Test-Path $wintunDst)) {
-    # wireguard-go's Windows tun package (golang.zx2c4.com/wintun) LoadLibraryEx-searches
-    # the application directory and System32 for wintun.dll, in that order -- it does not
-    # bundle the DLL itself (it's a separate signed driver artifact from the WireGuard
-    # project, not something to vendor into this repo). This downloads the official
-    # redistributable zip and extracts the matching architecture's DLL; the fetch itself
-    # (URL, extraction path inside the zip) has not been exercised in this sandbox --
-    # no outbound network access here to confirm it end-to-end. If this step fails,
-    # download wintun.dll manually from https://www.wintun.net and place it in $InstallDir.
-    $wintunZipUrl = "https://www.wintun.net/builds/wintun-0.14.1.zip"
-    $tmpZip = Join-Path $env:TEMP "wintun.zip"
-    $tmpDir = Join-Path $env:TEMP "wintun-extract"
-    try {
-        Invoke-WebRequest -Uri $wintunZipUrl -OutFile $tmpZip -UseBasicParsing
-        Expand-Archive -Force -Path $tmpZip -DestinationPath $tmpDir
-        $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "x86" }
-        Copy-Item -Force (Join-Path $tmpDir "wintun\bin\$arch\wintun.dll") $wintunDst
-    } catch {
-        Write-Warning "Could not download wintun.dll automatically ($_). Place it manually at $wintunDst before continuing."
-    } finally {
-        Remove-Item -Force -ErrorAction SilentlyContinue $tmpZip
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmpDir
+if (-not (Test-Path -LiteralPath $wintunDst -PathType Leaf)) {
+    # Prefer a release-bundled DLL when present. This keeps installs deterministic/offline
+    # once packaging begins shipping the signed Wintun redistributable alongside Bondify.
+    $wintunBundled = Join-Path $scriptDir "wintun.dll"
+    if (Test-Path -LiteralPath $wintunBundled -PathType Leaf) {
+        Copy-Item -Force -LiteralPath $wintunBundled -Destination $wintunDst
+    } else {
+        # Fallback for current release archives, which do not yet bundle Wintun.
+        $wintunZipUrl = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+        $tmpRoot = Join-Path $env:TEMP ("bondify-wintun-" + [Guid]::NewGuid().ToString("N"))
+        $tmpZip = Join-Path $tmpRoot "wintun.zip"
+        $tmpDir = Join-Path $tmpRoot "extract"
+        try {
+            New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+            Invoke-WebRequest -Uri $wintunZipUrl -OutFile $tmpZip -UseBasicParsing
+            Expand-Archive -Force -LiteralPath $tmpZip -DestinationPath $tmpDir
+            $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "x86" }
+            $downloadedDll = Join-Path $tmpDir "wintun\bin\$arch\wintun.dll"
+            if (-not (Test-Path -LiteralPath $downloadedDll -PathType Leaf)) {
+                throw "Downloaded Wintun archive did not contain the expected $arch DLL."
+            }
+            Copy-Item -Force -LiteralPath $downloadedDll -Destination $wintunDst
+        } catch {
+            throw "Unable to provision required wintun.dll: $($_.Exception.Message)"
+        } finally {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $tmpRoot
+        }
     }
+}
+
+if (-not (Test-Path -LiteralPath $wintunDst -PathType Leaf)) {
+    throw "Required wintun.dll is missing after provisioning; refusing to register or start Bondify."
 }
 
 # --- Autostart: a logon scheduled task running as the installing (admin) user. A Windows
 # service would match ARCHITECTURE.md §3.2's "admin-elevated service + unelevated tray UI
 # over a named pipe" design more closely, but that's a materially larger, harder-to-verify
-# surface (service install/start/stop lifecycle, a named-pipe IPC protocol between two
-# processes) for a phase whose actual gate is install time and UAC-prompt count, not process
-# architecture -- tracked as a known deviation in ARCHITECTURE.md §9, to revisit if a real
-# Windows test pass surfaces problems this simpler model can't solve. -----------------------
+# surface for this phase. -------------------------------------------------------------------
 $taskName = "Bondify"
 $action = New-ScheduledTaskAction -Execute (Join-Path $InstallDir "bondify.exe") `
     -Argument "-relay `"$RelayAddr`" -relay-pubkey `"$RelayPubKey`" -default-route"
@@ -107,14 +112,22 @@ $bonded = $false
 for ($i = 0; $i -lt 50; $i++) {
     try {
         $diag = Invoke-RestMethod -Uri "http://127.0.0.1:9090/api/v1/diagnostics" -TimeoutSec 1
-        if ($diag.paths.Count -ge 1) { $bonded = $true; break }
+        if ($null -ne $diag.paths -and $diag.paths.Count -ge 1) {
+            $bonded = $true
+            break
+        }
     } catch {}
     Start-Sleep -Milliseconds 1000
 }
 
 $elapsed = (Get-Date) - $start
-if ($bonded) {
-    Write-Host "Bondify installed and bonded in $([math]::Round($elapsed.TotalSeconds, 1))s."
-} else {
-    Write-Warning "Bondify installed but did not confirm a bonded session within 50s (elapsed $([math]::Round($elapsed.TotalSeconds, 1))s). Check the scheduled task 'Bondify' and its process output."
+if (-not $bonded) {
+    # A failed install must not leave a privileged autostart task repeatedly launching a
+    # client that never reached the release gate. Best-effort cleanup, then fail the caller.
+    try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch {}
+    try { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+    throw "Bondify did not confirm a bonded session within 50s (elapsed $([math]::Round($elapsed.TotalSeconds, 1))s); scheduled-task autostart was removed."
 }
+
+Write-Host "Bondify installed and bonded in $([math]::Round($elapsed.TotalSeconds, 1))s."
+exit 0
