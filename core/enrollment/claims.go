@@ -14,12 +14,13 @@ import (
 )
 
 const (
-	MinClaimSecretBytes = 16
-	MaxClaimSecretBytes = 64
-	MaxAccountIDRunes   = 128
-	MaxClaims           = 4096
-	MinClaimTTL         = time.Minute
-	MaxClaimTTL         = 24 * time.Hour
+	MinClaimSecretBytes       = 16
+	MaxClaimSecretBytes       = 64
+	GeneratedClaimSecretBytes = 32
+	MaxAccountIDRunes         = 128
+	MaxClaims                 = 4096
+	MinClaimTTL               = time.Minute
+	MaxClaimTTL               = 24 * time.Hour
 )
 
 var (
@@ -84,11 +85,50 @@ func (s *ClaimStore) Issue(accountID string, secret []byte) (EnrollmentClaim, er
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.issueLocked(accountID, secret)
+}
+
+// IssueGenerated creates a one-time enrollment claim with a cryptographically
+// random secret suitable for returning once to an authenticated account client.
+// Only the secret hash is retained by ClaimStore. The caller must treat the
+// returned secret as a credential and avoid persisting it in logs or inventory.
+func (s *ClaimStore) IssueGenerated(accountID string) (EnrollmentClaim, []byte, error) {
+	accountID, err := normalizeAccountID(accountID)
+	if err != nil {
+		return EnrollmentClaim{}, nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	now := s.now().UTC()
 	s.pruneExpiredLocked(now)
 	if len(s.claims) >= s.maxClaims {
-		return EnrollmentClaim{}, ErrClaimCapacity
+		return EnrollmentClaim{}, nil, ErrClaimCapacity
+	}
+
+	secret := make([]byte, GeneratedClaimSecretBytes)
+	if _, err := io.ReadFull(s.random, secret); err != nil {
+		return EnrollmentClaim{}, nil, ErrClaimRandom
+	}
+	claim, err := s.issueLockedAt(accountID, secret, now, false)
+	if err != nil {
+		return EnrollmentClaim{}, nil, err
+	}
+	return claim, secret, nil
+}
+
+func (s *ClaimStore) issueLocked(accountID string, secret []byte) (EnrollmentClaim, error) {
+	now := s.now().UTC()
+	return s.issueLockedAt(accountID, secret, now, true)
+}
+
+func (s *ClaimStore) issueLockedAt(accountID string, secret []byte, now time.Time, pruneAndCheckCapacity bool) (EnrollmentClaim, error) {
+	if pruneAndCheckCapacity {
+		s.pruneExpiredLocked(now)
+		if len(s.claims) >= s.maxClaims {
+			return EnrollmentClaim{}, ErrClaimCapacity
+		}
 	}
 
 	for attempts := 0; attempts < 4; attempts++ {
