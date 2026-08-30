@@ -14,26 +14,45 @@ if ! git rev-parse --verify "${candidate}^{commit}" >/dev/null 2>&1; then
   exit 1
 fi
 
-# checkout@v4 normally leaves a shallow repository. Hydrate main through an
-# explicit refspec so verification does not depend on checkout's narrow fetch
-# configuration. Only request --unshallow while Git says the repository is
-# shallow; repeating --unshallow after the first verification is an error.
-main_refspec='+refs/heads/main:refs/remotes/origin/main'
-if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
-  git fetch --no-tags --prune --unshallow origin "$main_refspec"
-else
-  git fetch --no-tags --prune origin "$main_refspec"
-fi
+candidate_commit=$(git rev-parse "${candidate}^{commit}")
 
-if ! git rev-parse --verify "${main_ref}^{commit}" >/dev/null 2>&1; then
-  echo "Refusing release: main ref '$main_ref' does not resolve to a commit." >&2
+# Do not mutate or depend on the caller's shallow boundary. checkout@v4 can
+# leave unrelated shallow roots (for example a tag/side commit), which makes
+# --unshallow against main fragile. Instead, prove containment in a disposable
+# full-history mirror of the configured origin. This keeps release policy
+# independent of checkout shape and leaves the working repository untouched.
+origin_url=$(git remote get-url origin 2>/dev/null || true)
+if [[ -z "$origin_url" ]]; then
+  echo "Refusing release: origin remote is unavailable." >&2
   exit 1
 fi
 
-candidate_commit=$(git rev-parse "${candidate}^{commit}")
-main_commit=$(git rev-parse "${main_ref}^{commit}")
+verify_repo=$(mktemp -d)
+trap 'rm -rf "$verify_repo"' EXIT
+if ! git clone --quiet --no-tags --bare "$origin_url" "$verify_repo/repo.git"; then
+  echo "Refusing release: could not hydrate origin history." >&2
+  exit 1
+fi
 
-if ! git merge-base --is-ancestor "$candidate_commit" "$main_commit"; then
+main_branch=${main_ref#origin/}
+main_verify_ref="refs/heads/$main_branch"
+if ! git -C "$verify_repo/repo.git" rev-parse --verify "${main_verify_ref}^{commit}" >/dev/null 2>&1; then
+  echo "Refusing release: main ref '$main_ref' does not resolve to a commit." >&2
+  exit 1
+fi
+main_commit=$(git -C "$verify_repo/repo.git" rev-parse "${main_verify_ref}^{commit}")
+
+# The candidate may have been checked out by SHA and need not have a named ref
+# in the mirror. Fetch that exact object explicitly, then perform the ancestry
+# proof entirely inside the complete mirror.
+if ! git -C "$verify_repo/repo.git" cat-file -e "${candidate_commit}^{commit}" 2>/dev/null; then
+  if ! git -C "$verify_repo/repo.git" fetch --quiet --no-tags "$origin_url" "$candidate_commit"; then
+    echo "Refusing release: candidate $candidate_commit is unavailable from origin." >&2
+    exit 1
+  fi
+fi
+
+if ! git -C "$verify_repo/repo.git" merge-base --is-ancestor "$candidate_commit" "$main_commit"; then
   echo "Refusing release: candidate $candidate_commit is not contained in $main_ref ($main_commit)." >&2
   exit 1
 fi
