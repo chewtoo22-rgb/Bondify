@@ -150,18 +150,29 @@ jobs:
         shell: bash
         run: |
           set +e
-          sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh 2>&1 | tee /tmp/bondify-phase4.log
+          sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh 2>&1 | tee phase4-test.log
           status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -eq 0 ]; then
             exit 0
           fi
-          if grep -Eq 'iperf_json_finish: pthread_mutex_lock|iperf_errexit: pthread_mutex_unlock' /tmp/bondify-phase4.log; then
-            echo "Detected known iperf3 pthread mutex crash; retrying Phase 4 once."
-            sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh
-          else
-            exit "$status"
+          if grep -Eq 'iperf_json_finish: pthread_mutex_lock|iperf_errexit: pthread_mutex_unlock' phase4-test.log; then
+            echo "Detected known iperf3 pthread mutex crash; retrying Phase 4 once." | tee -a phase4-test.log
+            set +e
+            sudo -E env "PATH=$PATH" bash testbed/run_phase4.sh 2>&1 | tee -a phase4-test.log
+            retry_status=${PIPESTATUS[0]}
+            set -e
+            exit "$retry_status"
           fi
+          exit "$status"
+      - name: Upload Phase 4 failure evidence
+        if: failure() && hashFiles('phase4-test.log') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: phase4-test.log
+          if-no-files-found: error
+          retention-days: 14
       - name: Run phase 7 gate (loaded BULK download, SSH-shaped RTT within 25%)
         run: sudo -E env "PATH=$PATH" bash testbed/run_phase7.sh
       - name: Run chaos gate (heterogeneous MTU + repeated path flaps)
