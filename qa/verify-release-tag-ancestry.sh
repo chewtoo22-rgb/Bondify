@@ -14,14 +14,13 @@ if ! git rev-parse --verify "${candidate}^{commit}" >/dev/null 2>&1; then
   exit 1
 fi
 
-# checkout@v4 defaults to a shallow clone. A depth-1 fetch of main cannot prove
-# that an older release candidate is contained in main because the ancestry
-# objects are absent. Deepen the repository before evaluating containment.
-if [[ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" == "true" ]]; then
-  git fetch --no-tags --prune --unshallow origin main
-else
-  git fetch --no-tags --prune origin main
-fi
+# checkout@v4 normally leaves a shallow repository. Hydrate the complete main
+# ancestry into the exact remote-tracking ref we verify. An explicit refspec
+# avoids relying on the checkout's remote fetch configuration, while the very
+# large depth works for both shallow and already-complete repositories without
+# the brittle --unshallow state transition.
+git fetch --no-tags --prune --depth=2147483647 origin \
+  '+refs/heads/main:refs/remotes/origin/main'
 
 if ! git rev-parse --verify "${main_ref}^{commit}" >/dev/null 2>&1; then
   echo "Refusing release: main ref '$main_ref' does not resolve to a commit." >&2
