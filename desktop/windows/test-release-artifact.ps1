@@ -49,7 +49,7 @@ foreach ($rawEntry in $entries) {
         throw 'Release archive contains a blank entry name.'
     }
 
-    $normalized = $entry.Replace('\\', '/')
+    $normalized = $entry.Replace('\', '/')
     if ($normalized.StartsWith('/') -or $normalized -match '^[A-Za-z]:' -or $normalized -match '(^|/)\.\.(/|$)') {
         throw "Release archive contains unsafe path entry: $entry"
     }
