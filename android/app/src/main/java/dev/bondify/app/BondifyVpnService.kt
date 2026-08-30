@@ -135,15 +135,19 @@ class BondifyVpnService : VpnService() {
                     Log.w(TAG, "some paths failed to join: ${handshaked.pathErrors}")
                 }
 
+                acquired.activateRuntime(handshaked)
+                checkNotStopping()
+
                 val handshakeMtu = handshaked.getMTU()
                 val mtu = if (handshakeMtu > 0) handshakeMtu.toInt() else 1280
+                val currentNetworks = acquired.currentNetworks()
                 val vpnBuilder = Builder()
                     .setSession(getString(R.string.app_name))
                     .setMtu(mtu)
                     .addAddress(handshaked.tunnelIP, handshaked.prefix.toInt())
                     .addRoute("0.0.0.0", 0)
                     .addDnsServer("1.1.1.1")
-                    .setUnderlyingNetworks(acquired.networks.toTypedArray())
+                    .setUnderlyingNetworks(currentNetworks.toTypedArray())
 
                 val pfd = vpnBuilder.establish()
                     ?: error("VpnService.Builder.establish() returned null (permission revoked mid-flight?)")
@@ -156,11 +160,11 @@ class BondifyVpnService : VpnService() {
 
                 handshaked.attachTUN(pfd.fd.toLong())
                 tunnel = handshaked
-                status = TunnelStatus.Connected(handshaked.tunnelIP, acquired.count)
+                status = TunnelStatus.Connected(handshaked.tunnelIP, currentNetworks.size)
                 Log.i(
                     TAG,
                     "tunnel established: session=${handshaked.sessionIndexHex} ip=${handshaked.tunnelIP} " +
-                        "prefix=${handshaked.prefix} gw=${handshaked.gatewayIP} mtu=$mtu paths=${acquired.count}",
+                        "prefix=${handshaked.prefix} gw=${handshaked.gatewayIP} mtu=$mtu paths=${currentNetworks.size}",
                 )
                 startForegroundWithNotification(connecting = false)
 
@@ -189,15 +193,16 @@ class BondifyVpnService : VpnService() {
 
     private data class AcquiredPaths(
         val count: Int,
-        val networks: List<Network>,
+        val currentNetworks: () -> List<Network>,
+        val activateRuntime: (Tunnel) -> Unit,
     )
 
     private fun acquirePaths(builder: TunnelBuilder, endpoint: RelayEndpoint): AcquiredPaths {
-        var added = 0
         val lock = Object()
-        var accepting = true
-        val addedLabels = mutableSetOf<String>()
-        val networks = mutableListOf<Network>()
+        var gathering = true
+        var runtimeTunnel: Tunnel? = null
+        val desiredNetworks = ActivePathRegistry<Network>()
+        val installedNetworks = mutableMapOf<String, Network>()
 
         fun dialSocketFd(network: Network, label: String): Long {
             var detachedFd: Int? = null
@@ -219,50 +224,60 @@ class BondifyVpnService : VpnService() {
             }
         }
 
-        fun tryAddDuringGathering(network: Network, label: String): Boolean {
+        fun syncRuntimePaths() {
             synchronized(lock) {
-                if (!accepting) {
-                    return false
-                }
-                if (stopping || label in addedLabels) {
-                    return true
-                }
-                try {
-                    builder.addPathFD(dialSocketFd(network, label), label)
-                    addedLabels += label
-                    networks += network
-                    added++
-                    Log.i(TAG, "added path: $label")
-                } catch (e: Exception) {
-                    Log.w(TAG, "could not add $label path: ${e.message}")
-                }
-                return true
-            }
-        }
+                val t = runtimeTunnel ?: return
+                val desired = desiredNetworks.snapshot()
 
-        fun tryRuntimeAdd(network: Network, label: String) {
-            val t = tunnel ?: return
-            try {
-                t.addPathFD(dialSocketFd(network, label), label)
-                Log.i(TAG, "runtime-added path: $label")
-            } catch (e: Exception) {
-                Log.w(TAG, "could not runtime-add $label path: ${e.message}")
-            }
-        }
+                for ((label, installedNetwork) in installedNetworks.toMap()) {
+                    if (desired[label] == installedNetwork) {
+                        continue
+                    }
+                    try {
+                        t.dropPathLabel(label)
+                        installedNetworks.remove(label)
+                        Log.i(TAG, "runtime-dropped path: $label")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "could not runtime-drop $label path: ${e.message}")
+                        continue
+                    }
+                }
 
-        fun tryRuntimeDrop(label: String) {
-            val t = tunnel ?: return
-            try {
-                t.dropPathLabel(label)
-                Log.i(TAG, "runtime-dropped path: $label")
-            } catch (e: Exception) {
-                Log.w(TAG, "could not runtime-drop $label path: ${e.message}")
+                for ((label, desiredNetwork) in desired) {
+                    if (installedNetworks[label] == desiredNetwork) {
+                        continue
+                    }
+                    try {
+                        t.addPathFD(dialSocketFd(desiredNetwork, label), label)
+                        installedNetworks[label] = desiredNetwork
+                        Log.i(TAG, "runtime-added path: $label")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "could not runtime-add $label path: ${e.message}")
+                    }
+                }
             }
         }
 
         fun onNetworkAvailable(network: Network, label: String) {
-            if (!tryAddDuringGathering(network, label)) {
-                tryRuntimeAdd(network, label)
+            val previous = desiredNetworks.replace(label, network)
+            if (previous != network) {
+                Log.i(TAG, "physical path available: $label")
+            }
+            val shouldSync = synchronized(lock) { !gathering }
+            if (shouldSync) {
+                syncRuntimePaths()
+            }
+        }
+
+        fun onNetworkLost(network: Network, label: String) {
+            if (!desiredNetworks.removeIfCurrent(label, network)) {
+                Log.i(TAG, "ignoring stale network loss for replaced path: $label")
+                return
+            }
+            Log.i(TAG, "physical path lost: $label")
+            val shouldSync = synchronized(lock) { !gathering }
+            if (shouldSync) {
+                syncRuntimePaths()
             }
         }
 
@@ -272,7 +287,7 @@ class BondifyVpnService : VpnService() {
             .build()
         wifiCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) = onNetworkAvailable(network, "wifi")
-            override fun onLost(network: Network) = tryRuntimeDrop("wifi")
+            override fun onLost(network: Network) = onNetworkLost(network, "wifi")
         }
         connectivityManager.requestNetwork(wifiRequest, wifiCallback!!)
 
@@ -282,15 +297,41 @@ class BondifyVpnService : VpnService() {
             .build()
         cellularCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) = onNetworkAvailable(network, "cellular")
-            override fun onLost(network: Network) = tryRuntimeDrop("cellular")
+            override fun onLost(network: Network) = onNetworkLost(network, "cellular")
         }
         connectivityManager.requestNetwork(cellularRequest, cellularCallback!!)
 
         Thread.sleep(PATH_WAIT_MS)
-        return synchronized(lock) {
-            accepting = false
-            AcquiredPaths(added, networks.toList())
+
+        val initialNetworks = desiredNetworks.snapshot()
+        var added = 0
+        synchronized(lock) {
+            for ((label, network) in initialNetworks) {
+                if (stopping) {
+                    break
+                }
+                try {
+                    builder.addPathFD(dialSocketFd(network, label), label)
+                    installedNetworks[label] = network
+                    added++
+                    Log.i(TAG, "added initial path: $label")
+                } catch (e: Exception) {
+                    Log.w(TAG, "could not add initial $label path: ${e.message}")
+                }
+            }
+            gathering = false
         }
+
+        return AcquiredPaths(
+            count = added,
+            currentNetworks = { desiredNetworks.snapshot().values.toList() },
+            activateRuntime = { t ->
+                synchronized(lock) {
+                    runtimeTunnel = t
+                }
+                syncRuntimePaths()
+            },
+        )
     }
 
     private fun checkNotStopping() {
