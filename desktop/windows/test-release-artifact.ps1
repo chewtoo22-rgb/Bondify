@@ -35,6 +35,31 @@ if ($actualHash -ne $expectedHash) {
     throw "Release archive SHA-256 mismatch: expected $expectedHash, got $actualHash."
 }
 
+$entries = @(& tar -tzf $archive)
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to list release archive; tar exited $LASTEXITCODE."
+}
+if ($entries.Count -eq 0) {
+    throw 'Release archive is empty.'
+}
+
+foreach ($rawEntry in $entries) {
+    $entry = ([string]$rawEntry).Trim()
+    if ([string]::IsNullOrWhiteSpace($entry)) {
+        throw 'Release archive contains a blank entry name.'
+    }
+
+    $normalized = $entry.Replace('\\', '/')
+    if ($normalized.StartsWith('/') -or $normalized -match '^[A-Za-z]:' -or $normalized -match '(^|/)\.\.(/|$)') {
+        throw "Release archive contains unsafe path entry: $entry"
+    }
+
+    $segments = @($normalized.Split('/') | Where-Object { $_ -ne '' -and $_ -ne '.' })
+    if ($segments.Count -eq 0) {
+        throw "Release archive contains an invalid path entry: $entry"
+    }
+}
+
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("bondify-release-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 try {
