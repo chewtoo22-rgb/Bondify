@@ -90,7 +90,19 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
-      - run: go test ./... -race -count=1
+      - name: Run race-enabled unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          go test ./... -race -count=1 -v 2>&1 | tee race-test.log
+      - name: Upload race-test failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: race-test-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: race-test.log
+          if-no-files-found: error
+          retention-days: 14
 
   android-app:
     name: Android app build (gomobile + Gradle)
