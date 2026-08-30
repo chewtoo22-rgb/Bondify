@@ -1,0 +1,33 @@
+name: Release Tag Ancestry
+
+on:
+  pull_request:
+    paths:
+      - 'qa/verify-release-tag-ancestry.sh'
+      - 'qa/test-release-tag-ancestry.sh'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-tag-ancestry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: |
+          bash -n qa/verify-release-tag-ancestry.sh
+          bash -n qa/test-release-tag-ancestry.sh
+      - name: Shallow-clone ancestry regression tests
+        run: bash qa/test-release-tag-ancestry.sh
+      - name: Require release workflow to use verifier
+        run: |
+          set -euo pipefail
+          grep -Fq 'bash qa/verify-release-tag-ancestry.sh "${GITHUB_SHA}"' .github/workflows/release.yml
+          if grep -Fq 'git fetch --no-tags --depth=1 origin main' .github/workflows/release.yml; then
+            echo 'release workflow still contains the shallow ancestry check' >&2
+            exit 1
+          fi
