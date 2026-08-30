@@ -911,10 +911,16 @@ func (r *Relay) handlePathAdd(oh proto.OuterHeader, ciphertext []byte, src *net.
 		return
 	}
 	var req PathAddPayload
-	if err := unmarshalCBOR(payload, &req); err != nil {
+	if err := unmarshalCBOR(payload, &req); err != nil || req.PathID != pathID {
 		return
 	}
-	p, _ := sess.getOrCreatePath(req.PathID, src)
+	p, isNew := sess.getOrCreatePath(req.PathID, src)
+	if !isNew {
+		cur := p.RemoteAddr()
+		if cur == nil || !udpAddrEqual(cur, src) {
+			p.SetRemoteAddr(src)
+		}
+	}
 	p.SetActive()
 
 	ackPayload, err := marshalCBOR(CtrlPathAddAck{Kind: "path_add_ack", PathID: req.PathID})
