@@ -50,6 +50,12 @@ func TestEffectiveTunnelMTURejectsBadSemantics(t *testing.T) {
 		{"ipv6 tunnel ip", func(c *bond.HandshakeRespPayload) { c.TunnelIP = "2001:db8::2" }, "tunnel IPv4"},
 		{"bad prefix", func(c *bond.HandshakeRespPayload) { c.Prefix = 33 }, "prefix"},
 		{"bad gateway", func(c *bond.HandshakeRespPayload) { c.GatewayIP = "bad" }, "gateway IPv4"},
+		{"different subnets", func(c *bond.HandshakeRespPayload) { c.GatewayIP = "10.78.0.1" }, "same /24 subnet"},
+		{"same tunnel and gateway", func(c *bond.HandshakeRespPayload) { c.GatewayIP = c.TunnelIP }, "must be distinct"},
+		{"tunnel network address", func(c *bond.HandshakeRespPayload) { c.TunnelIP = "10.77.0.0" }, "not a usable host"},
+		{"tunnel broadcast address", func(c *bond.HandshakeRespPayload) { c.TunnelIP = "10.77.0.255" }, "not a usable host"},
+		{"gateway network address", func(c *bond.HandshakeRespPayload) { c.GatewayIP = "10.77.0.0" }, "not a usable host"},
+		{"gateway broadcast address", func(c *bond.HandshakeRespPayload) { c.GatewayIP = "10.77.0.255" }, "not a usable host"},
 		{"mtu too small", func(c *bond.HandshakeRespPayload) { c.MTU = 575 }, "invalid tunnel MTU"},
 		{"mtu too large", func(c *bond.HandshakeRespPayload) { c.MTU = 65536 }, "invalid tunnel MTU"},
 	}
@@ -63,5 +69,15 @@ func TestEffectiveTunnelMTURejectsBadSemantics(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestEffectiveTunnelMTUAcceptsPointToPoint31(t *testing.T) {
+	cfg := validCfgPush()
+	cfg.TunnelIP = "10.77.0.2"
+	cfg.GatewayIP = "10.77.0.3"
+	cfg.Prefix = 31
+	if _, err := effectiveTunnelMTU(cfg, 1408); err != nil {
+		t.Fatalf("/31 point-to-point config rejected: %v", err)
 	}
 }
