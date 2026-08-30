@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   apk:
-    name: Build downloadable APK
+    name: Build and validate Android APKs
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,17 +27,49 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
-      - name: Build and test APK
+      - name: Test and build debug + release variants
         working-directory: android
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleDebug --console=plain
-      - name: Rename APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk Bondify-debug.apk
-      - name: Upload APK
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease --console=plain
+      - name: Validate unsigned release APK contract
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release-unsigned.apk
+          ANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          test -s "$APK"
+          test -x "$ANALYZER"
+
+          test "$($ANALYZER manifest application-id "$APK")" = "dev.bondify.app"
+          test "$($ANALYZER manifest min-sdk "$APK")" = "24"
+          test "$($ANALYZER manifest target-sdk "$APK")" = "34"
+          test "$($ANALYZER manifest debuggable "$APK")" = "false"
+
+          permissions="$($ANALYZER manifest permissions "$APK")"
+          grep -Fxq "android.permission.INTERNET" <<<"$permissions"
+          grep -Fxq "android.permission.BIND_VPN_SERVICE" <<<"$permissions" || true
+
+          # BIND_VPN_SERVICE is a service-level protection rather than a uses-permission, so
+          # verify the compiled manifest still contains the non-exported VPN service contract.
+          manifest="$($ANALYZER manifest print "$APK")"
+          grep -Fq 'android.permission.BIND_VPN_SERVICE' <<<"$manifest"
+          grep -Fq 'android:exported="false"' <<<"$manifest"
+          grep -Fq 'android.net.VpnService' <<<"$manifest"
+      - name: Package CI APKs and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/Bondify-debug.apk
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk dist/Bondify-release-UNSIGNED.apk
+          (cd dist && sha256sum Bondify-debug.apk Bondify-release-UNSIGNED.apk > SHA256SUMS)
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: Bondify-debug-apk
-          path: Bondify-debug.apk
+          name: Bondify-android-ci-apks
+          path: |
+            dist/Bondify-debug.apk
+            dist/Bondify-release-UNSIGNED.apk
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
