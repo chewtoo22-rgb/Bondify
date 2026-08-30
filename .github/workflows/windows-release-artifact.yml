@@ -1,0 +1,75 @@
+name: Windows Release Artifact Acceptance
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/cmd/bondify/**'
+      - 'desktop/windows/**'
+      - 'core/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/windows-release-artifact.yml'
+      - '.github/workflows/release.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/cmd/bondify/**'
+      - 'desktop/windows/**'
+      - 'core/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/windows-release-artifact.yml'
+      - '.github/workflows/release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Build shipping-form Windows archive
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          name=bondify-windows-amd64
+          mkdir -p "dist/$name"
+          go build -trimpath -ldflags='-s -w' -o "dist/$name/bondify.exe" ./desktop/cmd/bondify
+          cp desktop/windows/install.ps1 "dist/$name/install.ps1"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bondify-windows-release-candidate
+          path: |
+            dist/bondify-windows-amd64.tar.gz
+            dist/bondify-windows-amd64.tar.gz.sha256
+          if-no-files-found: error
+
+  native-acceptance:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bondify-windows-release-candidate
+          path: dist
+      - name: Validate exact packaged artifact on Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\desktop\windows\test-release-artifact.ps1 `
+            -ArchivePath .\dist\bondify-windows-amd64.tar.gz `
+            -ChecksumPath .\dist\bondify-windows-amd64.tar.gz.sha256
