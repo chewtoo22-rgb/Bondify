@@ -29,6 +29,77 @@ function Require-Pattern {
     }
 }
 
+# Relay configuration is embedded in both the elevated process argument list and the
+# privileged scheduled-task command line. It must be validated before either boundary.
+Require-Pattern 'function\s+Assert-RelayAddress' 'relay address admission function'
+Require-Pattern 'function\s+Assert-RelayPublicKey' 'relay public-key admission function'
+Require-Pattern 'FromBase64String' 'relay public-key base64 decoding'
+Require-Pattern 'decoded\.Length\s+-ne\s+32' '32-byte relay public-key requirement'
+Require-Pattern 'ToBase64String\(\$decoded\)\s+-cne\s+\$Value' 'canonical relay public-key requirement'
+
+$addressAdmission = $source.IndexOf('Assert-RelayAddress -Value $RelayAddr')
+$keyAdmission = $source.IndexOf('Assert-RelayPublicKey -Value $RelayPubKey')
+$elevation = $source.IndexOf('Start-Process -FilePath "powershell.exe"')
+$taskAction = $source.IndexOf('New-ScheduledTaskAction')
+if ($addressAdmission -lt 0 -or $keyAdmission -lt 0 -or $elevation -lt 0 -or $taskAction -lt 0) {
+    throw 'Unable to locate installer input-admission and privileged command boundaries.'
+}
+if ($addressAdmission -gt $elevation -or $keyAdmission -gt $elevation -or $addressAdmission -gt $taskAction -or $keyAdmission -gt $taskAction) {
+    throw 'Relay input admission must run before elevation and scheduled-task command construction.'
+}
+
+# Execute only the pure admission functions from the parsed installer. This provides
+# behavioral regression coverage without triggering UAC, file copies, downloads, or tasks.
+$functionAsts = $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -in @('Assert-RelayAddress', 'Assert-RelayPublicKey')
+}, $true)
+if ($functionAsts.Count -ne 2) {
+    throw "Expected exactly two relay admission functions; found $($functionAsts.Count)."
+}
+foreach ($functionAst in $functionAsts) {
+    Invoke-Expression $functionAst.Extent.Text
+}
+
+function Assert-Passes {
+    param([scriptblock]$Action, [string]$Description)
+    try {
+        & $Action
+    } catch {
+        throw "Expected admission success for ${Description}: $($_.Exception.Message)"
+    }
+}
+
+function Assert-Fails {
+    param([scriptblock]$Action, [string]$Description)
+    $failed = $false
+    try {
+        & $Action
+    } catch {
+        $failed = $true
+    }
+    if (-not $failed) {
+        throw "Expected admission failure for ${Description}."
+    }
+}
+
+$validKey = [Convert]::ToBase64String([byte[]]::new(32))
+Assert-Passes { Assert-RelayAddress -Value 'relay.example.com:443' } 'DNS relay'
+Assert-Passes { Assert-RelayAddress -Value '192.0.2.10:51820' } 'IPv4 relay'
+Assert-Passes { Assert-RelayAddress -Value '[2001:db8::1]:443' } 'IPv6 relay'
+Assert-Passes { Assert-RelayPublicKey -Value $validKey } 'canonical 32-byte key'
+
+Assert-Fails { Assert-RelayAddress -Value 'relay.example.com:443" -default-route "false' } 'quoted argument injection'
+Assert-Fails { Assert-RelayAddress -Value 'relay.example.com:443;whoami' } 'command separator injection'
+Assert-Fails { Assert-RelayAddress -Value 'relay.example.com:0' } 'zero port'
+Assert-Fails { Assert-RelayAddress -Value 'relay.example.com:65536' } 'overflow port'
+Assert-Fails { Assert-RelayAddress -Value '999.1.1.1:443' } 'invalid IPv4 literal'
+Assert-Fails { Assert-RelayAddress -Value 'bad..host:443' } 'empty DNS label'
+Assert-Fails { Assert-RelayPublicKey -Value 'not-base64' } 'malformed base64 key'
+Assert-Fails { Assert-RelayPublicKey -Value ([Convert]::ToBase64String([byte[]]::new(31))) } '31-byte key'
+Assert-Fails { Assert-RelayPublicKey -Value ($validKey + "`n") } 'whitespace-bearing key'
+
 # Elevation must propagate the elevated process result instead of reading this shell's stale
 # LASTEXITCODE value after Start-Process.
 Require-Pattern '-PassThru' 'elevated process handle'
