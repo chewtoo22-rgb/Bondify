@@ -1,0 +1,31 @@
+name: Settings Admission Contract
+
+on:
+  pull_request:
+    paths:
+      - 'core/settings/**'
+      - '.github/workflows/settings-admission.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Run settings admission regressions
+        run: go test ./core/settings -count=1 -v
+      - name: Verify package remains platform-neutral
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -RInE '"(os/exec|net/http|syscall|golang.org/x/sys[^\"]*)"|exec\.Command|syscall\.' core/settings --include='*.go'; then
+            echo 'settings admission contract gained a platform, network, or execution dependency' >&2
+            exit 1
+          fi
