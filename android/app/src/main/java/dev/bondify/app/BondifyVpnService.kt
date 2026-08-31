@@ -109,21 +109,22 @@ class BondifyVpnService : VpnService() {
                 val prefs = getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
                 val clientKeyB64 = Prefs.clientKey(prefs)
                     ?: error("no client key generated yet (MainActivity should have done this on first run)")
+                val runtimeSettings = Prefs.interfaceSettings(prefs)
 
                 val builder = TunnelBuilder(
                     relayAddr,
                     relayPubKeyB64,
                     clientKeyB64,
                     /* scheduler = */ "hol-aware",
-                    /* mode = */ "speed",
+                    /* mode = */ runtimeSettings.modeWireValue,
                     /* fec = */ true,
                 )
 
                 val endpoint = parseRelayEndpoint(relayAddr)
-                val acquired = acquirePaths(builder, endpoint)
+                val acquired = acquirePaths(builder, endpoint, runtimeSettings)
                 checkNotStopping()
                 if (acquired.count == 0) {
-                    error("no uplink (Wi-Fi or cellular) became available within ${PATH_WAIT_MS}ms")
+                    error("no enabled uplink became available within ${PATH_WAIT_MS}ms")
                 }
 
                 val handshaked = builder.handshake()
@@ -197,7 +198,11 @@ class BondifyVpnService : VpnService() {
         val activateRuntime: (Tunnel) -> Unit,
     )
 
-    private fun acquirePaths(builder: TunnelBuilder, endpoint: RelayEndpoint): AcquiredPaths {
+    private fun acquirePaths(
+        builder: TunnelBuilder,
+        endpoint: RelayEndpoint,
+        runtimeSettings: RuntimeInterfaceSettings.Selection,
+    ): AcquiredPaths {
         val lock = Object()
         var gathering = true
         var runtimeTunnel: Tunnel? = null
@@ -281,25 +286,33 @@ class BondifyVpnService : VpnService() {
             }
         }
 
-        val wifiRequest = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        wifiCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = onNetworkAvailable(network, "wifi")
-            override fun onLost(network: Network) = onNetworkLost(network, "wifi")
+        if (runtimeSettings.isEnabled(RuntimeInterfaceSettings.WIFI)) {
+            val wifiRequest = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            wifiCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) =
+                    onNetworkAvailable(network, RuntimeInterfaceSettings.WIFI)
+                override fun onLost(network: Network) =
+                    onNetworkLost(network, RuntimeInterfaceSettings.WIFI)
+            }
+            connectivityManager.requestNetwork(wifiRequest, wifiCallback!!)
         }
-        connectivityManager.requestNetwork(wifiRequest, wifiCallback!!)
 
-        val cellularRequest = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        cellularCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = onNetworkAvailable(network, "cellular")
-            override fun onLost(network: Network) = onNetworkLost(network, "cellular")
+        if (runtimeSettings.isEnabled(RuntimeInterfaceSettings.CELLULAR)) {
+            val cellularRequest = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cellularCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) =
+                    onNetworkAvailable(network, RuntimeInterfaceSettings.CELLULAR)
+                override fun onLost(network: Network) =
+                    onNetworkLost(network, RuntimeInterfaceSettings.CELLULAR)
+            }
+            connectivityManager.requestNetwork(cellularRequest, cellularCallback!!)
         }
-        connectivityManager.requestNetwork(cellularRequest, cellularCallback!!)
 
         Thread.sleep(PATH_WAIT_MS)
 
@@ -431,10 +444,20 @@ object Prefs {
     const val NAME = "bondify_prefs"
     const val KEY_RELAY_ADDR = "relay_addr"
     const val KEY_RELAY_PUBKEY = "relay_pubkey"
+    const val KEY_BOND_MODE = "bond_mode"
+    const val KEY_WIFI_ENABLED = "wifi_enabled"
+    const val KEY_CELLULAR_ENABLED = "cellular_enabled"
 
     fun clientKey(prefs: SharedPreferences): String? = ClientKeyStore.getOrMigrate(prefs)
 
     fun setClientKey(prefs: SharedPreferences, value: String) {
         ClientKeyStore.store(prefs, value)
     }
+
+    fun interfaceSettings(prefs: SharedPreferences): RuntimeInterfaceSettings.Selection =
+        RuntimeInterfaceSettings.fromStoredValues(
+            modeRaw = prefs.getString(KEY_BOND_MODE, "speed") ?: "speed",
+            wifiEnabled = prefs.getBoolean(KEY_WIFI_ENABLED, true),
+            cellularEnabled = prefs.getBoolean(KEY_CELLULAR_ENABLED, true),
+        )
 }
