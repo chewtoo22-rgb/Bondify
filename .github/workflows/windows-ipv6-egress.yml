@@ -1,0 +1,28 @@
+name: Windows IPv6 Egress Binding
+
+on:
+  pull_request:
+    paths:
+      - 'core/tun/windows.go'
+      - 'core/tun/windows_egress_test.go'
+      - '.github/workflows/windows-ipv6-egress.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-egress-binding:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - name: Unit test Windows TUN bindings
+        shell: pwsh
+        run: go test ./core/tun -run 'TestUnicastInterfaceSockopt' -count=1
+      - name: Compile Windows desktop client
+        shell: pwsh
+        run: go build ./desktop/cmd/bondify
