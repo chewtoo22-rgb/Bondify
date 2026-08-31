@@ -16,6 +16,10 @@ var (
 // the destination atomically. The destination parent must already exist and must
 // not itself be a symlink. Existing symlink and non-regular destinations are
 // rejected so callers cannot redirect an export outside the reviewed path.
+//
+// The temporary file and containing directory are synced before success is
+// returned. This makes a reported successful export durable across an immediate
+// crash or power loss instead of merely durable in the process page cache.
 func WriteSupportExportFile(path string, snapshot Snapshot) error {
 	if !filepath.IsAbs(path) {
 		return ErrSupportExportPathRelative
@@ -70,9 +74,13 @@ func WriteSupportExportFile(path string, snapshot Snapshot) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close support export: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := replaceSupportExportFile(tmpName, path); err != nil {
 		return fmt.Errorf("commit support export: %w", err)
 	}
 	committed = true
+
+	if err := syncSupportExportDir(dir); err != nil {
+		return fmt.Errorf("sync support export directory: %w", err)
+	}
 	return nil
 }
