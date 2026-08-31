@@ -4,18 +4,18 @@ package dev.bondify.app
  * Converts persisted Android preferences into the portable interface-settings contract used by
  * the VPN runtime. Android currently knows how to acquire only Wi-Fi and cellular uplinks, so
  * unknown interface selectors fail closed instead of being silently ignored.
+ *
+ * [Selection] is intentionally a plain public value type because [Prefs] exposes it to callers;
+ * the internal contract implementation remains hidden behind [fromStoredValues].
  */
-internal object RuntimeInterfaceSettings {
+object RuntimeInterfaceSettings {
     const val WIFI = "wifi"
     const val CELLULAR = "cellular"
 
     data class Selection(
-        val mode: InterfaceSettingsContract.Mode,
+        val modeWireValue: String,
         val enabledInterfaces: Set<String>,
     ) {
-        val modeWireValue: String
-            get() = mode.wireValue
-
         fun isEnabled(interfaceId: String): Boolean = interfaceId in enabledInterfaces
     }
 
@@ -41,7 +41,7 @@ internal object RuntimeInterfaceSettings {
         }
 
         return Selection(
-            mode = config.mode,
+            modeWireValue = config.mode.wireValue,
             enabledInterfaces = config.interfaces.filter { it.enabled }.mapTo(linkedSetOf()) { it.id },
         )
     }
