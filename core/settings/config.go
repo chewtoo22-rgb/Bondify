@@ -1,7 +1,6 @@
 package settings
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,98 +9,99 @@ import (
 
 const (
 	SchemaVersion       = 1
-	MaxPreferredPaths   = 16
+	MaxInterfaces       = 8
 	MaxInterfaceIDRunes = 64
-	MaxActivePaths      = 8
-	MaxFECPercent       = 50
 )
 
+// Mode is the user-facing connection policy. STREAM and CUSTOM remain reserved until
+// the corresponding core modes are implemented; validation rejects them rather than
+// silently mapping them to SPEED.
 type Mode string
 
 const (
-	ModeSpeed     Mode = "SPEED"
-	ModeRedundant Mode = "REDUNDANT"
-	ModeStream    Mode = "STREAM"
-	ModeCustom    Mode = "CUSTOM"
+	ModeSpeed     Mode = "speed"
+	ModeRedundant Mode = "redundant"
+	ModeStream    Mode = "stream"
+	ModeCustom    Mode = "custom"
 )
 
-type Config struct {
-	Schema              int
-	Mode                Mode
-	AllowMetered        bool
-	PreferredInterfaces []string
-	ActivePaths         int
-	FECPercent          int
+// InterfacePreference is a stable, platform-provided interface selector plus whether
+// the user wants Bondify to consider it for a session. It deliberately carries no IP,
+// endpoint, SSID, token, or other network-secret material.
+type InterfacePreference struct {
+	ID      string `json:"id"`
+	Enabled bool   `json:"enabled"`
 }
 
-func Admit(in Config) (Config, error) {
-	if in.Schema != SchemaVersion {
-		return Config{}, fmt.Errorf("unsupported settings schema %d", in.Schema)
-	}
-	if !validMode(in.Mode) {
-		return Config{}, fmt.Errorf("unsupported bond mode %q", in.Mode)
-	}
-	if in.ActivePaths < 1 || in.ActivePaths > MaxActivePaths {
-		return Config{}, fmt.Errorf("active paths must be between 1 and %d", MaxActivePaths)
-	}
-	if in.FECPercent < 0 || in.FECPercent > MaxFECPercent {
-		return Config{}, fmt.Errorf("fec percent must be between 0 and %d", MaxFECPercent)
-	}
-	if in.Mode != ModeCustom && in.FECPercent != 0 {
-		return Config{}, errors.New("fec percent is only configurable in CUSTOM mode")
-	}
-	if len(in.PreferredInterfaces) > MaxPreferredPaths {
-		return Config{}, fmt.Errorf("preferred interface count exceeds %d", MaxPreferredPaths)
+// Config is the portable settings contract consumed by Android/Windows integration.
+type Config struct {
+	SchemaVersion int                   `json:"schema_version"`
+	Mode          Mode                  `json:"mode"`
+	Interfaces    []InterfacePreference `json:"interfaces"`
+}
+
+// Normalize validates and canonicalizes a config. It fails closed on unsupported
+// schema/modes, malformed IDs, duplicate selectors, excessive interfaces, or a config
+// that disables every interface. Interface order is canonicalized so persistence and
+// diagnostics are deterministic across platforms.
+func Normalize(in Config) (Config, error) {
+	if in.SchemaVersion != SchemaVersion {
+		return Config{}, fmt.Errorf("settings: unsupported schema version %d", in.SchemaVersion)
 	}
 
-	seen := make(map[string]struct{}, len(in.PreferredInterfaces))
-	preferred := make([]string, 0, len(in.PreferredInterfaces))
-	for _, raw := range in.PreferredInterfaces {
-		id := strings.TrimSpace(raw)
-		if err := validateInterfaceID(id); err != nil {
+	switch in.Mode {
+	case ModeSpeed, ModeRedundant:
+		// implemented modes
+	case ModeStream, ModeCustom:
+		return Config{}, fmt.Errorf("settings: mode %q is reserved but not implemented", in.Mode)
+	default:
+		return Config{}, fmt.Errorf("settings: unknown mode %q", in.Mode)
+	}
+
+	if len(in.Interfaces) == 0 {
+		return Config{}, fmt.Errorf("settings: at least one interface is required")
+	}
+	if len(in.Interfaces) > MaxInterfaces {
+		return Config{}, fmt.Errorf("settings: interface count %d exceeds %d", len(in.Interfaces), MaxInterfaces)
+	}
+
+	out := Config{SchemaVersion: SchemaVersion, Mode: in.Mode, Interfaces: make([]InterfacePreference, 0, len(in.Interfaces))}
+	seen := make(map[string]struct{}, len(in.Interfaces))
+	enabled := 0
+	for _, pref := range in.Interfaces {
+		id, err := normalizeInterfaceID(pref.ID)
+		if err != nil {
 			return Config{}, err
 		}
-		key := strings.ToLower(id)
-		if _, ok := seen[key]; ok {
-			return Config{}, fmt.Errorf("duplicate preferred interface %q", id)
+		if _, ok := seen[id]; ok {
+			return Config{}, fmt.Errorf("settings: duplicate interface %q", id)
 		}
-		seen[key] = struct{}{}
-		preferred = append(preferred, id)
+		seen[id] = struct{}{}
+		if pref.Enabled {
+			enabled++
+		}
+		out.Interfaces = append(out.Interfaces, InterfacePreference{ID: id, Enabled: pref.Enabled})
 	}
-	sort.Slice(preferred, func(i, j int) bool {
-		return strings.ToLower(preferred[i]) < strings.ToLower(preferred[j])
-	})
+	if enabled == 0 {
+		return Config{}, fmt.Errorf("settings: at least one interface must be enabled")
+	}
 
-	return Config{
-		Schema:              SchemaVersion,
-		Mode:                in.Mode,
-		AllowMetered:        in.AllowMetered,
-		PreferredInterfaces: preferred,
-		ActivePaths:         in.ActivePaths,
-		FECPercent:          in.FECPercent,
-	}, nil
+	sort.Slice(out.Interfaces, func(i, j int) bool { return out.Interfaces[i].ID < out.Interfaces[j].ID })
+	return out, nil
 }
 
-func validMode(mode Mode) bool {
-	switch mode {
-	case ModeSpeed, ModeRedundant, ModeStream, ModeCustom:
-		return true
-	default:
-		return false
-	}
-}
-
-func validateInterfaceID(id string) error {
+func normalizeInterfaceID(raw string) (string, error) {
+	id := strings.TrimSpace(raw)
 	if id == "" {
-		return errors.New("preferred interface id must not be blank")
+		return "", fmt.Errorf("settings: interface ID is empty")
 	}
-	if len([]rune(id)) > MaxInterfaceIDRunes {
-		return fmt.Errorf("preferred interface id exceeds %d runes", MaxInterfaceIDRunes)
+	if n := len([]rune(id)); n > MaxInterfaceIDRunes {
+		return "", fmt.Errorf("settings: interface ID exceeds %d runes", MaxInterfaceIDRunes)
 	}
 	for _, r := range id {
 		if unicode.IsControl(r) {
-			return errors.New("preferred interface id contains control characters")
+			return "", fmt.Errorf("settings: interface ID contains control characters")
 		}
 	}
-	return nil
+	return id, nil
 }
