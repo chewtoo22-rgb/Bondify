@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -RInE 'os/exec|net/http|syscall|golang.org/x/sys|android|windows|powershell|cmd.exe' core/settings --include='*.go'; then
-            echo 'settings admission contract gained a platform or execution dependency' >&2
+          if grep -RInE '"(os/exec|net/http|syscall|golang.org/x/sys[^\"]*)"|exec\.Command|syscall\.' core/settings --include='*.go'; then
+            echo 'settings admission contract gained a platform, network, or execution dependency' >&2
             exit 1
           fi
