@@ -10,26 +10,29 @@ const MaxObservedInterfaces = 32
 
 var (
     ErrNoEligibleInterfaces = errors.New("no eligible interfaces")
-    ErrTooManyInterfaces     = errors.New("too many observed interfaces")
+    ErrTooManyInterfaces    = errors.New("too many observed interfaces")
     ErrDuplicateInterface   = errors.New("duplicate interface id")
     ErrInvalidInterfaceID   = errors.New("invalid interface id")
+    ErrInvalidActiveLimit   = errors.New("invalid active path limit")
 )
 
 // ObservedInterface is the platform-neutral state required to decide whether
 // an uplink may participate in a Bondify session.
 type ObservedInterface struct {
-    ID        string
-    Up        bool
-    HasRoute  bool
-    Metered   bool
+    ID       string
+    Up       bool
+    HasRoute bool
+    Metered  bool
 }
 
 // Policy is deliberately small and fail-closed. ExplicitIDs, when non-empty,
 // acts as an allowlist. AllowMetered controls whether metered links may enter
-// the candidate set.
+// the candidate set. MaxActivePaths bounds the returned candidate set when
+// positive; zero preserves the existing unbounded behavior.
 type Policy struct {
-    ExplicitIDs []string
-    AllowMetered bool
+    ExplicitIDs   []string
+    AllowMetered  bool
+    MaxActivePaths int
 }
 
 // Admit validates observed interface identity and returns a deterministic list
@@ -37,6 +40,9 @@ type Policy struct {
 func Admit(observed []ObservedInterface, policy Policy) ([]string, error) {
     if len(observed) > MaxObservedInterfaces {
         return nil, ErrTooManyInterfaces
+    }
+    if policy.MaxActivePaths < 0 || policy.MaxActivePaths > MaxObservedInterfaces {
+        return nil, ErrInvalidActiveLimit
     }
 
     allow := map[string]struct{}{}
@@ -81,6 +87,9 @@ func Admit(observed []ObservedInterface, policy Policy) ([]string, error) {
         return nil, ErrNoEligibleInterfaces
     }
     sort.Strings(eligible)
+    if policy.MaxActivePaths > 0 && len(eligible) > policy.MaxActivePaths {
+        eligible = eligible[:policy.MaxActivePaths]
+    }
     return eligible, nil
 }
 
