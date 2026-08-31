@@ -1,0 +1,30 @@
+name: Release Asset Completeness
+
+on:
+  pull_request:
+    paths:
+      - 'qa/release-asset-completeness.sh'
+      - 'qa/test-release-asset-completeness.sh'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-asset-completeness.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'qa/release-asset-completeness.sh'
+      - 'qa/test-release-asset-completeness.sh'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-asset-completeness.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run release asset completeness regression
+        run: bash qa/test-release-asset-completeness.sh
+      - name: Verify release workflow delegates to validator
+        run: |
+          grep -Fq 'bash qa/release-asset-completeness.sh release-assets' .github/workflows/release.yml

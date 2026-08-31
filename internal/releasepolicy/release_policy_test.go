@@ -50,14 +50,29 @@ func TestReleaseWorkflowPinsTaggedReleasesToMainAndAttestsArtifacts(t *testing.T
 
 func TestReleaseWorkflowKeepsUnsignedAndroidBuildOutOfPublishedAssets(t *testing.T) {
 	workflow := loadPolicyFile(t, "../../.github/workflows/release.yml")
+	validator := loadPolicyFile(t, "../../qa/release-asset-completeness.sh")
 
+	// The publish job intentionally delegates asset-set and checksum enforcement
+	// to one reusable fail-closed validator. Test both the delegation and the
+	// validator contract so implementation can move out of YAML without losing
+	// the release safety guarantees.
 	requirePolicyFragments(t, workflow,
 		"bondify-android-UNSIGNED-DEBUG.apk",
 		"name: ci-android-unsigned-debug",
 		"pattern: bondify-*",
-		"Refusing to publish an Android APK: no signed Android release configuration exists yet.",
-		"sha256sum -c",
-		"release-assets/SHA256SUMS",
+		"Verify release asset completeness and checksums",
+		"bash qa/release-asset-completeness.sh release-assets",
+		"files: release-assets/*",
 		"needs: [build, android-ci]",
+	)
+	requirePolicyFragments(t, validator,
+		"refusing to publish Android APKs: signed Android release packaging is not enabled",
+		"sha256sum -c",
+		"SHA256SUMS",
+		"missing checksum for",
+		"orphan checksum without archive",
+		"checksum filename mismatch",
+		"release archive/checksum count mismatch",
+		"release asset must be a regular non-symlink file",
 	)
 }
