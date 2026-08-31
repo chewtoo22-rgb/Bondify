@@ -47,7 +47,7 @@ func (s *FileStore) Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("settings: open store: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, MaxConfigBytes+1))
 	if err != nil {
