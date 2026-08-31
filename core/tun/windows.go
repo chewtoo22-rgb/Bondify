@@ -143,13 +143,24 @@ func AddBypassRoute(cidr string, route PhysicalRoute) (added bool, err error) {
 	return strings.Contains(string(out), "added"), nil
 }
 
-// DelRoute removes a previously-added route/CIDR. Unlike AddHostRoute/Configure, this uses
-// PowerShell's Remove-NetRoute rather than `netsh`: netsh's route-delete form requires
-// naming the owning interface, which this function (matching Linux's `ip route del <cidr>`,
-// interface-less) doesn't take; Remove-NetRoute can delete by destination prefix alone.
+func canonicalIPv4Prefix(cidr string) (string, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() {
+		return "", fmt.Errorf("tun: invalid IPv4 route CIDR %q", cidr)
+	}
+	return prefix.Masked().String(), nil
+}
+
+// DelRoute removes a previously-added IPv4 route/CIDR. Validate and canonicalize the
+// destination before embedding it in the PowerShell command so malformed/user-controlled
+// input cannot become command text.
 func DelRoute(cidr string) error {
+	canonical, err := canonicalIPv4Prefix(cidr)
+	if err != nil {
+		return err
+	}
 	if err := run("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		"Remove-NetRoute -DestinationPrefix "+cidr+" -Confirm:$false"); err != nil {
+		"Remove-NetRoute -DestinationPrefix '"+canonical+"' -Confirm:$false"); err != nil {
 		return fmt.Errorf("tun: delete route: %w", err)
 	}
 	return nil
