@@ -52,24 +52,27 @@ function Assert-RelayAddress {
         throw "RelayAddr port must be in the range 1..65535."
     }
 
-    $host = $match.Groups['host'].Value
-    if ($host.StartsWith('[')) {
+    # PowerShell variable names are case-insensitive and $Host is a built-in read-only
+    # automatic variable. Use a non-reserved name so the pure admission function behaves
+    # identically under the Windows runner and when dot-sourced by contract tests.
+    $relayHost = $match.Groups['host'].Value
+    if ($relayHost.StartsWith('[')) {
         $ip = $null
-        if (-not [System.Net.IPAddress]::TryParse($host.Substring(1, $host.Length - 2), [ref]$ip) -or $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        if (-not [System.Net.IPAddress]::TryParse($relayHost.Substring(1, $relayHost.Length - 2), [ref]$ip) -or $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
             throw "RelayAddr bracketed host must be a valid IPv6 literal."
         }
         return
     }
 
-    if ($host -match '^[0-9.]+$') {
+    if ($relayHost -match '^[0-9.]+$') {
         $ip = $null
-        if (-not [System.Net.IPAddress]::TryParse($host, [ref]$ip) -or $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        if (-not [System.Net.IPAddress]::TryParse($relayHost, [ref]$ip) -or $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
             throw "RelayAddr numeric host must be a valid IPv4 literal."
         }
         return
     }
 
-    foreach ($label in $host.Split('.')) {
+    foreach ($label in $relayHost.Split('.')) {
         if ($label.Length -lt 1 -or $label.Length -gt 63 -or $label -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
             throw "RelayAddr contains an invalid DNS label."
         }
