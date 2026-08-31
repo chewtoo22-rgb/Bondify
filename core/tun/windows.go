@@ -15,20 +15,39 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// ipUnicastIF is IP_UNICAST_IF, the IPPROTO_IP-level sockopt Windows uses to pin a socket's
-// egress adapter. It isn't defined as a constant in golang.org/x/sys/windows; its value (31)
-// is a stable, Microsoft-documented Winsock ABI constant, not something that changes across
-// Windows versions.
-const ipUnicastIF = 31
+// ipUnicastIF and ipv6UnicastIF are the Winsock interface-pinning options. Both have the
+// stable Windows SDK value 31, but they deliberately use different levels and byte order:
+// IP_UNICAST_IF takes a network-order IPv4 interface index while IPV6_UNICAST_IF takes the
+// interface index in host order.
+const (
+	ipUnicastIF   = 31
+	ipv6UnicastIF = 31
+)
 
 // htonl reverses idx's byte order. IP_UNICAST_IF is the one common sockopt Microsoft
 // documents as wanting its DWORD argument in network (big-endian) byte order rather than
 // host order -- see "IP_UNICAST_IF socket option" in the Windows SDK docs (IPv6's
-// IPV6_UNICAST_IF, not used here, is the opposite: host order). A plain byte reversal is
-// sufficient because every architecture Windows currently ships on (x86, amd64, arm64) is
-// little-endian.
+// IPV6_UNICAST_IF is the opposite: host order). A plain byte reversal is sufficient because
+// every architecture Windows currently ships on (x86, amd64, arm64) is little-endian.
 func htonl(idx uint32) uint32 {
 	return (idx>>24)&0xff | (idx>>8)&0xff00 | (idx<<8)&0xff0000 | (idx<<24)&0xff000000
+}
+
+// unicastInterfaceSockopt returns the protocol level, option, and correctly encoded
+// interface index for the relay address family. Keeping this decision explicit prevents an
+// IPv6 relay socket from accidentally receiving the IPv4 IP_UNICAST_IF option, which would
+// leave a Windows multipath socket unpinned or make the dial fail entirely.
+func unicastInterfaceSockopt(raddr *net.UDPAddr, index uint32) (level, option, value int, err error) {
+	if raddr == nil || raddr.IP == nil {
+		return 0, 0, 0, fmt.Errorf("tun: relay address has no IP family")
+	}
+	if raddr.IP.To4() != nil {
+		return windows.IPPROTO_IP, ipUnicastIF, int(htonl(index)), nil
+	}
+	if raddr.IP.To16() != nil {
+		return windows.IPPROTO_IPV6, ipv6UnicastIF, int(index), nil
+	}
+	return 0, 0, 0, fmt.Errorf("tun: unsupported relay IP %q", raddr.IP.String())
 }
 
 // EgressDevice reports the adapter Windows' routing table currently uses to reach dst,
@@ -193,10 +212,9 @@ func Configure(ifName string, localCIDR string, routes []string) error {
 }
 
 // DialUDPViaDevice dials a UDP socket bound to laddr (may be nil) and, if device is
-// non-empty, pinned to that adapter via IP_UNICAST_IF -- Windows has no SO_BINDTODEVICE;
-// this is its equivalent, needed for the same multipath reason core/tun/linux.go's
-// DialUDPViaDevice documents (destination-based routing alone can't give two uplinks
-// reaching the same relay address their own distinct egress interfaces).
+// non-empty, pins it to that adapter using the address-family-appropriate Winsock option.
+// Windows uses IP_UNICAST_IF for IPv4 and IPV6_UNICAST_IF for IPv6; using the IPv4 option
+// unconditionally breaks explicit multipath egress binding for IPv6 relays.
 func DialUDPViaDevice(ctx context.Context, laddr *net.UDPAddr, raddr *net.UDPAddr, device string) (*net.UDPConn, error) {
 	d := net.Dialer{}
 	if laddr != nil {
@@ -207,11 +225,14 @@ func DialUDPViaDevice(ctx context.Context, laddr *net.UDPAddr, raddr *net.UDPAdd
 		if err != nil {
 			return nil, fmt.Errorf("tun: interface %q: %w", device, err)
 		}
-		idx := int(htonl(uint32(ifi.Index)))
+		level, option, value, err := unicastInterfaceSockopt(raddr, uint32(ifi.Index))
+		if err != nil {
+			return nil, err
+		}
 		d.Control = func(_, _ string, c syscall.RawConn) error {
 			var opErr error
 			if err := c.Control(func(fd uintptr) {
-				opErr = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, ipUnicastIF, idx)
+				opErr = windows.SetsockoptInt(windows.Handle(fd), level, option, value)
 			}); err != nil {
 				return err
 			}
