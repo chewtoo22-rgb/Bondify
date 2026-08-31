@@ -85,7 +85,6 @@ jobs:
           if [[ "${{ matrix.name }}" == bondify-windows-* ]]; then
             cp desktop/windows/install.ps1 "dist/${{ matrix.name }}/install.ps1"
           fi
-          # Normalize archive metadata so repeated builds of the same source are easier to compare.
           tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
             -C dist -czf "dist/${{ matrix.name }}.tar.gz" "${{ matrix.name }}"
           sha256sum "dist/${{ matrix.name }}.tar.gz" > "dist/${{ matrix.name }}.tar.gz.sha256"
@@ -101,10 +100,6 @@ jobs:
             dist/${{ matrix.name }}.tar.gz.sha256
           if-no-files-found: error
 
-  # Android currently has no release signing configuration in Gradle. Keep exercising the
-  # full Go -> gomobile -> Gradle chain, but make the output explicitly CI-only and keep it
-  # out of GitHub Releases. Publishing app-debug.apk as a release asset would make an
-  # unsigned/debuggable build look production-ready.
   android-ci:
     needs: verify
     runs-on: ubuntu-latest
@@ -149,26 +144,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          # Only the desktop/relay matrix artifacts use the bondify-* namespace.
-          # The CI-only Android debug APK is intentionally named ci-android-* and cannot
-          # leak into the release asset directory through this download step.
           pattern: bondify-*
           path: release-assets
           merge-multiple: true
-      - name: Verify release asset boundary and checksums
-        run: |
-          set -euo pipefail
-          if find release-assets -maxdepth 1 -type f -name '*.apk' | grep -q .; then
-            echo 'Refusing to publish an Android APK: no signed Android release configuration exists yet.' >&2
-            exit 1
-          fi
-          find release-assets -maxdepth 1 -type f -name '*.sha256' -print0 | sort -z | while IFS= read -r -d '' sum; do
-            (cd release-assets && sha256sum -c "$(basename "$sum")")
-          done
-          find release-assets -maxdepth 1 -type f -name '*.sha256' -print0 | sort -z | xargs -0 cat > release-assets/SHA256SUMS
-          test -s release-assets/SHA256SUMS
+      - name: Verify release asset completeness and checksums
+        run: bash qa/release-asset-completeness.sh release-assets
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
