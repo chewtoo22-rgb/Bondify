@@ -18,7 +18,7 @@
     Relay address, host:port. Required.
 
 .PARAMETER RelayPubKey
-    Relay's base64 public key. Required.
+    Relay's canonical base64-encoded 32-byte public key. Required.
 
 .PARAMETER InstallDir
     Where to install. Defaults to Program Files\Bondify.
@@ -31,6 +31,81 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+function Assert-RelayAddress {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    if ($Value.Length -eq 0 -or $Value.Length -gt 300) {
+        throw "RelayAddr must be a bounded host:port value."
+    }
+
+    $match = [regex]::Match(
+        $Value,
+        '^(?<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?):(?<port>[0-9]{1,5})$'
+    )
+    if (-not $match.Success) {
+        throw "RelayAddr must be host:port with no whitespace or command-line metacharacters."
+    }
+
+    $port = 0
+    if (-not [int]::TryParse($match.Groups['port'].Value, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
+        throw "RelayAddr port must be in the range 1..65535."
+    }
+
+    # PowerShell variable names are case-insensitive and $Host is a built-in read-only
+    # automatic variable. Use a non-reserved name so the pure admission function behaves
+    # identically under the Windows runner and when dot-sourced by contract tests.
+    $relayHost = $match.Groups['host'].Value
+    if ($relayHost.StartsWith('[')) {
+        $ip = $null
+        if (-not [System.Net.IPAddress]::TryParse($relayHost.Substring(1, $relayHost.Length - 2), [ref]$ip) -or $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+            throw "RelayAddr bracketed host must be a valid IPv6 literal."
+        }
+        return
+    }
+
+    if ($relayHost -match '^[0-9.]+$') {
+        $ip = $null
+        if (-not [System.Net.IPAddress]::TryParse($relayHost, [ref]$ip) -or $ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+            throw "RelayAddr numeric host must be a valid IPv4 literal."
+        }
+        return
+    }
+
+    foreach ($label in $relayHost.Split('.')) {
+        if ($label.Length -lt 1 -or $label.Length -gt 63 -or $label -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$') {
+            throw "RelayAddr contains an invalid DNS label."
+        }
+    }
+}
+
+function Assert-RelayPublicKey {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    if ($Value.Length -eq 0 -or $Value.Length -gt 64 -or $Value -match '\s') {
+        throw "RelayPubKey must be a bounded canonical base64 value with no whitespace."
+    }
+
+    try {
+        $decoded = [Convert]::FromBase64String($Value)
+    } catch {
+        throw "RelayPubKey must be valid base64."
+    }
+
+    if ($decoded.Length -ne 32) {
+        throw "RelayPubKey must decode to exactly 32 bytes."
+    }
+    if ([Convert]::ToBase64String($decoded) -cne $Value) {
+        throw "RelayPubKey must use canonical base64 encoding."
+    }
+}
+
+# Validate every value later embedded in an elevated process or scheduled-task command line
+# before requesting elevation. This keeps malformed or command-like input out of the
+# privileged boundary rather than relying on quoting after the fact.
+Assert-RelayAddress -Value $RelayAddr
+Assert-RelayPublicKey -Value $RelayPubKey
+
 $start = Get-Date
 
 # --- Single UAC prompt: re-launch elevated exactly once, then stop. ---------------------
