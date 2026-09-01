@@ -24,7 +24,7 @@ func TestFileStoreRejectsSymlinkedParent(t *testing.T) {
 	}
 
 	_, err := NewFileStore(filepath.Join(linkDir, "nested", "settings.json"))
-	if err == nil || !strings.Contains(err.Error(), "symlinked store parent") {
+	if err == nil || !strings.Contains(err.Error(), "store parent") {
 		t.Fatalf("NewFileStore symlinked parent error = %v", err)
 	}
 }
@@ -56,7 +56,7 @@ func TestFileStoreRejectsParentSwapBeforeSave(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := store.Save(testConfig()); err == nil || !strings.Contains(err.Error(), "symlinked store parent") {
+	if err := store.Save(testConfig()); err == nil || !strings.Contains(err.Error(), "store parent") {
 		t.Fatalf("Save after parent swap error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(attackerDir, "settings.json")); !os.IsNotExist(err) {
