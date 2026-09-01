@@ -1,0 +1,39 @@
+name: Settings Profile Contract
+
+on:
+  pull_request:
+    paths:
+      - 'core/settings/**'
+      - '.github/workflows/settings-profile-contract.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'core/settings/**'
+      - '.github/workflows/settings-profile-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  settings-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run settings admission regressions
+        run: go test ./core/settings -count=1
+      - name: Enforce pure admission boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          file='core/settings/profile.go'
+          ! grep -Eq 'net\.|os\.|exec\.|syscall\.|unsafe\.|http\.|Dial|Listen|WriteFile|Remove|Rename' "$file"
+          grep -F 'ErrInvalidProfile' "$file"
+          grep -F 'SchemaVersion' "$file"
+          grep -F 'ModeSpeed' "$file"
+          grep -F 'ModeRedundant' "$file"
+          grep -F 'ModeStream' "$file"
+          grep -F 'ModeCustom' "$file"
