@@ -94,6 +94,61 @@ func TestRevokeDeviceWireIsAccountScoped(t *testing.T) {
 	}
 }
 
+func TestRevokeDeviceResultWireReturnsCanonicalSuccess(t *testing.T) {
+	service, registry := newDeviceManagementTestService(t)
+	deviceID := "00112233445566778899aabbccddeeff"
+	if err := registry.Put(DeviceRecord{
+		AccountID:  "acct-a",
+		DeviceID:   deviceID,
+		Name:       "Phone",
+		Platform:   PlatformAndroid,
+		EnrolledAt: time.Date(2026, 9, 1, 3, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("{\"device_id\":\"" + deviceID + "\"}")
+	result, err := service.RevokeDeviceResultWire("acct-a", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) > MaxDeviceRevokeResultBytes {
+		t.Fatalf("result length = %d", len(result))
+	}
+	if strings.Contains(string(result), "acct-a") {
+		t.Fatalf("revoke result leaked account identity: %s", result)
+	}
+	var decoded DeviceRevokeResult
+	if err := json.Unmarshal(result, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Version != DeviceManagementWireVersion || decoded.DeviceID != deviceID || !decoded.Revoked {
+		t.Fatalf("unexpected revoke result: %+v", decoded)
+	}
+	if _, err := registry.Get("acct-a", deviceID); !errors.Is(err, ErrDeviceNotFound) {
+		t.Fatalf("device still present after success: %v", err)
+	}
+}
+
+func TestRevokeDeviceResultWireReturnsNoSuccessOnFailure(t *testing.T) {
+	service, _ := newDeviceManagementTestService(t)
+	deviceID := "00112233445566778899aabbccddeeff"
+	payload := []byte("{\"device_id\":\"" + deviceID + "\"}")
+	result, err := service.RevokeDeviceResultWire("acct-a", payload)
+	if !errors.Is(err, ErrDeviceNotFound) {
+		t.Fatalf("error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("result = %q, want nil on failed revocation", result)
+	}
+}
+
+func TestEncodeDeviceRevokeResultRejectsInvalidID(t *testing.T) {
+	if result, err := EncodeDeviceRevokeResult("bad"); !errors.Is(err, ErrDeviceManagementWire) || result != nil {
+		t.Fatalf("result = %q error = %v", result, err)
+	}
+}
+
 func TestDecodeDeviceRevokeWireFailsClosed(t *testing.T) {
 	validID := "00112233445566778899aabbccddeeff"
 	tests := [][]byte{
@@ -119,5 +174,8 @@ func TestDeviceManagementWireNilServiceFailsClosed(t *testing.T) {
 	payload := []byte("{\"device_id\":\"00112233445566778899aabbccddeeff\"}")
 	if err := service.RevokeDeviceWire("acct-a", payload); !errors.Is(err, ErrDeviceDirectory) {
 		t.Fatalf("revoke error = %v", err)
+	}
+	if result, err := service.RevokeDeviceResultWire("acct-a", payload); !errors.Is(err, ErrDeviceDirectory) || result != nil {
+		t.Fatalf("revoke result = %q error = %v", result, err)
 	}
 }

@@ -13,6 +13,7 @@ const (
 	DeviceManagementWireVersion = 1
 	MaxDeviceManagementWireBytes = 16 * 1024
 	MaxDeviceRevokeWireBytes     = 256
+	MaxDeviceRevokeResultBytes   = 256
 )
 
 var ErrDeviceManagementWire = errors.New("invalid device management wire payload")
@@ -37,6 +38,15 @@ type DeviceInventoryItem struct {
 // The authenticated account identity never appears in this payload.
 type DeviceRevokeRequest struct {
 	DeviceID string `json:"device_id"`
+}
+
+// DeviceRevokeResult is the canonical cross-platform success response. It
+// intentionally contains no account identity or credentials; transports already
+// know the authenticated account and only need an unambiguous acknowledgement.
+type DeviceRevokeResult struct {
+	Version int    `json:"version"`
+	DeviceID string `json:"device_id"`
+	Revoked bool   `json:"revoked"`
 }
 
 // EncodeDeviceInventory validates, sorts, and serializes deterministic device
@@ -100,6 +110,23 @@ func DecodeDeviceRevokeWire(payload []byte) (string, error) {
 	return request.DeviceID, nil
 }
 
+// EncodeDeviceRevokeResult returns a bounded deterministic acknowledgement only
+// after the underlying account-scoped revocation has succeeded.
+func EncodeDeviceRevokeResult(deviceID string) ([]byte, error) {
+	if !validDeviceID(deviceID) {
+		return nil, ErrDeviceManagementWire
+	}
+	encoded, err := json.Marshal(DeviceRevokeResult{
+		Version:  DeviceManagementWireVersion,
+		DeviceID: deviceID,
+		Revoked:  true,
+	})
+	if err != nil || len(encoded) > MaxDeviceRevokeResultBytes {
+		return nil, ErrDeviceManagementWire
+	}
+	return encoded, nil
+}
+
 // ListDevicesWire returns canonical account-scoped device inventory for an
 // already-authenticated account.
 func (s *AccountService) ListDevicesWire(accountID string) ([]byte, error) {
@@ -118,4 +145,18 @@ func (s *AccountService) RevokeDeviceWire(accountID string, payload []byte) erro
 		return err
 	}
 	return s.RevokeDevice(accountID, deviceID)
+}
+
+// RevokeDeviceResultWire performs the same account-scoped revocation and then
+// emits one canonical success payload for Android and Windows transports. No
+// success body is returned when decoding or durable revocation fails.
+func (s *AccountService) RevokeDeviceResultWire(accountID string, payload []byte) ([]byte, error) {
+	deviceID, err := DecodeDeviceRevokeWire(payload)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.RevokeDevice(accountID, deviceID); err != nil {
+		return nil, err
+	}
+	return EncodeDeviceRevokeResult(deviceID)
 }
