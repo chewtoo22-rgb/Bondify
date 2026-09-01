@@ -1,0 +1,42 @@
+name: Windows PE Architecture Contract
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/windows/pe-machine.ps1'
+      - 'desktop/windows/test-pe-machine-contract.ps1'
+      - 'desktop/windows/test-release-artifact.ps1'
+      - '.github/workflows/windows-pe-architecture.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-pe-architecture:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Run hostile PE architecture regressions
+        shell: pwsh
+        run: ./desktop/windows/test-pe-machine-contract.ps1
+      - name: Build real Windows amd64 client
+        shell: pwsh
+        run: |
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          $env:CGO_ENABLED = '0'
+          New-Item -ItemType Directory -Force -Path dist/bondify-windows-amd64 | Out-Null
+          go build -trimpath -ldflags='-s -w' -o dist/bondify-windows-amd64/bondify.exe ./desktop/cmd/bondify
+          Copy-Item desktop/windows/install.ps1 dist/bondify-windows-amd64/install.ps1
+      - name: Package and accept real release artifact
+        shell: pwsh
+        run: |
+          tar -C dist -czf dist/bondify-windows-amd64.tar.gz bondify-windows-amd64
+          $hash = (Get-FileHash dist/bondify-windows-amd64.tar.gz -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  bondify-windows-amd64.tar.gz" | Set-Content -NoNewline dist/bondify-windows-amd64.tar.gz.sha256
+          ./desktop/windows/test-release-artifact.ps1 -ArchivePath dist/bondify-windows-amd64.tar.gz -ChecksumPath dist/bondify-windows-amd64.tar.gz.sha256
