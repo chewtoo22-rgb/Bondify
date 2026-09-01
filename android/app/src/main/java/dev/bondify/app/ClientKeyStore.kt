@@ -36,20 +36,21 @@ internal object ClientKeyStore {
             require(ciphertext != null && iv != null) {
                 "Bondify encrypted client identity is incomplete"
             }
-            return decrypt(ciphertext, iv)
+            return validateIdentity(decrypt(ciphertext, iv))
         }
 
         val legacy = prefs.getString(LEGACY_KEY, null) ?: return null
-        store(prefs, legacy)
-        return legacy
+        val validated = validateIdentity(legacy)
+        store(prefs, validated)
+        return validated
     }
 
     @Synchronized
     fun store(prefs: SharedPreferences, value: String) {
-        require(value.isNotBlank()) { "Bondify client identity cannot be blank" }
+        val validated = validateIdentity(value)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateWrappingKey())
-        val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        val encrypted = cipher.doFinal(validated.toByteArray(Charsets.UTF_8))
 
         val committed = prefs.edit()
             .putString(CIPHERTEXT_KEY, Base64.encodeToString(encrypted, Base64.NO_WRAP))
@@ -58,6 +59,11 @@ internal object ClientKeyStore {
             .commit()
         check(committed) { "failed to persist encrypted Bondify client identity" }
     }
+
+    private fun validateIdentity(value: String): String =
+        ClientIdentityContract.validateBase64(value) { encoded ->
+            Base64.decode(encoded, Base64.NO_WRAP)
+        }
 
     private fun decrypt(ciphertextB64: String, ivB64: String): String {
         val encrypted = Base64.decode(ciphertextB64, Base64.NO_WRAP)
