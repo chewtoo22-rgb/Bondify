@@ -56,6 +56,16 @@ func (s *AccountService) IssueEnrollmentClaim(accountID string) (EnrollmentClaim
 	return s.claims.IssueGenerated(accountID)
 }
 
+// RevokeEnrollmentClaim cancels an outstanding one-time claim for the
+// separately authenticated account. This is safe to call without presenting
+// the claim secret because account authentication is the authority boundary.
+func (s *AccountService) RevokeEnrollmentClaim(accountID, claimID string) error {
+	if s == nil || s.claims == nil {
+		return ErrEnrollmentStore
+	}
+	return s.claims.Revoke(accountID, claimID)
+}
+
 // EnrollDevice validates the device identity, commits the durable record, and
 // consumes the one-time claim only after persistence succeeds.
 func (s *AccountService) EnrollDevice(accountID, claimID string, secret []byte, request Request) (DeviceRecord, error) {
