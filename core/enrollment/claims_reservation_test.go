@@ -9,8 +9,8 @@ import (
 
 func TestConsumeAndCommitDoesNotBlockUnrelatedClaims(t *testing.T) {
 	now := time.Date(2026, 9, 1, 16, 0, 0, 0, time.UTC)
-	random := bytes.NewReader(bytes.Repeat([]byte{0x71}, 64))
-	store, err := NewClaimStore(8, 10*time.Minute, random, func() time.Time { return now })
+	randomBytes := append(bytes.Repeat([]byte{0x71}, 16), bytes.Repeat([]byte{0x72}, 16)...)
+	store, err := NewClaimStore(8, 10*time.Minute, bytes.NewReader(randomBytes), func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestConsumeAndCommitDoesNotBlockUnrelatedClaims(t *testing.T) {
 
 func TestReservedClaimRejectsConcurrentConsumeAndRevoke(t *testing.T) {
 	now := time.Date(2026, 9, 1, 16, 0, 0, 0, time.UTC)
-	store, err := NewClaimStore(8, 10*time.Minute, bytes.NewReader(bytes.Repeat([]byte{0x72}, 32)), func() time.Time { return now })
+	store, err := NewClaimStore(8, 10*time.Minute, bytes.NewReader(bytes.Repeat([]byte{0x72}, 16)), func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestReservedClaimRejectsConcurrentConsumeAndRevoke(t *testing.T) {
 
 func TestFailedCommitReleasesReservationForRetry(t *testing.T) {
 	now := time.Date(2026, 9, 1, 16, 0, 0, 0, time.UTC)
-	store, err := NewClaimStore(8, 10*time.Minute, bytes.NewReader(bytes.Repeat([]byte{0x73}, 32)), func() time.Time { return now })
+	store, err := NewClaimStore(8, 10*time.Minute, bytes.NewReader(bytes.Repeat([]byte{0x73}, 16)), func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestFailedCommitReleasesReservationForRetry(t *testing.T) {
 
 func TestFailedCommitBurnsClaimIfItExpiresWhileReserved(t *testing.T) {
 	now := time.Date(2026, 9, 1, 16, 0, 0, 0, time.UTC)
-	store, err := NewClaimStore(8, time.Minute, bytes.NewReader(bytes.Repeat([]byte{0x74}, 32)), func() time.Time { return now })
+	store, err := NewClaimStore(8, time.Minute, bytes.NewReader(bytes.Repeat([]byte{0x74}, 16)), func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
