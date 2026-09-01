@@ -3,6 +3,7 @@ package enrollment
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,81 @@ func TestFileDeviceStoreRejectsCorruptAndSymlinkState(t *testing.T) {
 	}
 	if _, err := OpenFileDeviceStore(link, 2); err == nil {
 		t.Fatal("expected symlink rejection")
+	}
+}
+
+func TestFileDeviceStoreRejectsSymlinkedParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating directory symlinks may require elevated Windows privileges")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "real")
+	if err := os.MkdirAll(filepath.Join(target, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "redirect")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(link, "nested", "devices.json")
+	if _, err := OpenFileDeviceStore(path, 2); err == nil {
+		t.Fatal("expected symlinked parent rejection")
+	}
+}
+
+func TestFileDeviceStoreRevalidatesParentBeforePersist(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating directory symlinks may require elevated Windows privileges")
+	}
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(stateDir, "devices.json")
+	store, err := OpenFileDeviceStore(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	realDir := filepath.Join(root, "redirect-target")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, stateDir); err != nil {
+		t.Fatal(err)
+	}
+
+	record := fileStoreTestDeviceRecord("acct-a", strings.Repeat("d", 32), "Phone")
+	if err := store.Put(record); err == nil {
+		t.Fatal("expected persist to reject parent replaced with symlink")
+	}
+	if _, err := os.Stat(filepath.Join(realDir, "devices.json")); !os.IsNotExist(err) {
+		t.Fatalf("redirect target was unexpectedly written, err=%v", err)
+	}
+	got, err := store.List("acct-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("registry mutation was not rolled back: %#v", got)
+	}
+}
+
+func TestFileDeviceStoreAllowsMissingSafeParentSuffix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "a", "b", "devices.json")
+	store, err := OpenFileDeviceStore(path, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(fileStoreTestDeviceRecord("acct-a", strings.Repeat("e", 32), "Phone")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
 	}
 }
 
