@@ -44,7 +44,7 @@ func TestClaimStoreRevokeIsAccountScopedAndImmediate(t *testing.T) {
 
 func TestClaimRevokeWireStrictAndBounded(t *testing.T) {
 	claimID := strings.Repeat("a", 32)
-	payload := []byte(fmt.Sprintf(`{"claim_id":%q}`, claimID))
+	payload := []byte(fmt.Sprintf("{\"claim_id\":%q}", claimID))
 	got, err := DecodeClaimRevokeWire(payload)
 	if err != nil {
 		t.Fatal(err)
@@ -55,9 +55,9 @@ func TestClaimRevokeWireStrictAndBounded(t *testing.T) {
 
 	badPayloads := [][]byte{
 		nil,
-		[]byte(`{"claim_id":"bad"}`),
-		[]byte(fmt.Sprintf(`{"claim_id":%q,"account_id":"acct-a"}`, claimID)),
-		[]byte(fmt.Sprintf(`{"claim_id":%q}{}`, claimID)),
+		[]byte("{\"claim_id\":\"bad\"}"),
+		[]byte(fmt.Sprintf("{\"claim_id\":%q,\"account_id\":\"acct-a\"}", claimID)),
+		[]byte(fmt.Sprintf("{\"claim_id\":%q}{}", claimID)),
 		bytes.Repeat([]byte("x"), MaxClaimRevokeWireBytes+1),
 	}
 	for _, bad := range badPayloads {
@@ -73,7 +73,7 @@ func TestClaimRevokeWireStrictAndBounded(t *testing.T) {
 	if len(result) > MaxClaimRevokeResultBytes {
 		t.Fatalf("result size = %d, max %d", len(result), MaxClaimRevokeResultBytes)
 	}
-	want := fmt.Sprintf(`{"version":1,"claim_id":%q,"revoked":true}`, claimID)
+	want := fmt.Sprintf("{\"version\":1,\"claim_id\":%q,\"revoked\":true}", claimID)
 	if string(result) != want {
 		t.Fatalf("result = %s, want %s", result, want)
 	}
@@ -101,7 +101,7 @@ func TestAccountServiceRevokeEnrollmentClaimResultWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := []byte(fmt.Sprintf(`{"claim_id":%q}`, claim.ID))
+	payload := []byte(fmt.Sprintf("{\"claim_id\":%q}", claim.ID))
 
 	result, err := service.RevokeEnrollmentClaimResultWire("acct-b", payload)
 	if !errors.Is(err, ErrClaimInvalid) || result != nil {
@@ -112,7 +112,7 @@ func TestAccountServiceRevokeEnrollmentClaimResultWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(result, []byte(`"revoked":true`)) || !bytes.Contains(result, []byte(claim.ID)) {
+	if !bytes.Contains(result, []byte("\"revoked\":true")) || !bytes.Contains(result, []byte(claim.ID)) {
 		t.Fatalf("unexpected revoke result: %s", result)
 	}
 	if bytes.Contains(result, []byte("acct-a")) || bytes.Contains(result, secret) {
