@@ -7,7 +7,6 @@ import (
 )
 
 const (
-	SchemaVersion     = 1
 	MaxRelayHostBytes = 253
 	MinMTU            = 1280
 	MaxMTU            = 9000
@@ -16,15 +15,6 @@ const (
 )
 
 var ErrInvalidProfile = errors.New("invalid settings profile")
-
-type Mode string
-
-const (
-	ModeSpeed     Mode = "speed"
-	ModeRedundant Mode = "redundant"
-	ModeStream    Mode = "stream"
-	ModeCustom    Mode = "custom"
-)
 
 type Profile struct {
 	SchemaVersion int
@@ -36,12 +26,14 @@ type Profile struct {
 }
 
 // Admit validates and normalizes settings shared by Android and Windows before
-// platform code is allowed to apply them to the networking core.
+// platform code is allowed to apply them to the networking core. It deliberately
+// reuses the canonical Mode and SchemaVersion contract from config.go so platform
+// settings cannot drift from the modes the core actually implements.
 func Admit(in Profile) (Profile, error) {
 	if in.SchemaVersion != SchemaVersion {
 		return Profile{}, invalid("schema_version")
 	}
-	if !validMode(in.Mode) {
+	if !validProfileMode(in.Mode) {
 		return Profile{}, invalid("mode")
 	}
 
@@ -69,10 +61,14 @@ func Admit(in Profile) (Profile, error) {
 	}, nil
 }
 
-func validMode(mode Mode) bool {
+func validProfileMode(mode Mode) bool {
 	switch mode {
-	case ModeSpeed, ModeRedundant, ModeStream, ModeCustom:
+	case ModeSpeed, ModeRedundant:
 		return true
+	case ModeStream, ModeCustom:
+		// Reserved in the canonical settings contract until the corresponding
+		// networking behavior exists. Never admit them optimistically.
+		return false
 	default:
 		return false
 	}
