@@ -16,6 +16,7 @@ func TestParseLocalPathSpecs(t *testing.T) {
 		{name: "single ipv4", raw: "10.60.0.1", wantLen: 1},
 		{name: "dual pinned", raw: "10.60.0.1@wlan0,10.61.0.1@wwan0", wantLen: 2},
 		{name: "ipv6 canonicalized", raw: "2001:0db8::1@Ethernet 2", wantLen: 1},
+		{name: "link local ipv6 pinned", raw: "fe80::1234@Ethernet 2", wantLen: 1},
 		{name: "empty element", raw: "10.60.0.1@wlan0,", wantErr: "is empty"},
 		{name: "invalid ip", raw: "not-an-ip@wlan0", wantErr: "invalid bind IP"},
 		{name: "empty device", raw: "10.60.0.1@", wantErr: "empty device"},
@@ -24,6 +25,10 @@ func TestParseLocalPathSpecs(t *testing.T) {
 		{name: "duplicate address", raw: "10.60.0.1@wlan0,10.60.0.1@wwan0", wantErr: "reuses bind address"},
 		{name: "duplicate device", raw: "10.60.0.1@wlan0,10.61.0.1@wlan0", wantErr: "reuses pinned device"},
 		{name: "control in device", raw: "10.60.0.1@wlan\n0", wantErr: "control characters"},
+		{name: "mapped ipv6 rejected", raw: "::ffff:10.60.0.1@Ethernet 2", wantErr: "IPv4-mapped IPv6"},
+		{name: "multicast ipv4 rejected", raw: "239.1.2.3@Ethernet 2", wantErr: "multicast bind address"},
+		{name: "multicast ipv6 rejected", raw: "ff02::1@Ethernet 2", wantErr: "multicast bind address"},
+		{name: "link local ipv6 requires device", raw: "fe80::1234", wantErr: "requires a pinned device"},
 	}
 
 	for _, tc := range tests {
