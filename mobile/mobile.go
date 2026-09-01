@@ -103,6 +103,12 @@ func NewTunnelBuilder(relayAddr, relayPubKeyB64, clientKeyB64, scheduler, mode s
 // that the resulting Tunnel's own AddPathFD/DropPathLabel use to address this same physical
 // uplink later, across churn (see Tunnel's doc comment).
 func (b *TunnelBuilder) AddPathFD(fd int, label string) error {
+	if err := validatePathLabel(label); err != nil {
+		return err
+	}
+	if pathLabelExists(b.labels, label) {
+		return fmt.Errorf("mobile: path %q already added to tunnel builder", label)
+	}
 	udpConn, err := adoptUDPFd(fd, label)
 	if err != nil {
 		return err
@@ -289,6 +295,9 @@ const addPathHandshakeTimeout = 5 * time.Second
 // TunnelBuilder.AddPathFD's. label must not already be registered -- call DropPathLabel
 // first if replacing an existing one under the same label.
 func (tu *Tunnel) AddPathFD(fd int, label string) error {
+	if err := validatePathLabel(label); err != nil {
+		return err
+	}
 	udpConn, err := adoptUDPFd(fd, label)
 	if err != nil {
 		return err
