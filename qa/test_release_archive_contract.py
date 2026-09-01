@@ -4,7 +4,9 @@ import pathlib
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
+import release_archive_contract as contract
 from release_archive_contract import validate_archive
 
 
@@ -83,6 +85,40 @@ class ReleaseArchiveContractTest(unittest.TestCase):
 
     def test_unsupported_name_rejected(self):
         self.run_case("bondify-linux-riscv64.tar.gz", [("bondify-linux-riscv64", "dir", 0o755, b"")], False)
+
+    def test_compressed_archive_size_bound_rejected(self):
+        root = "bondify-linux-amd64"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / f"{root}.tar.gz"
+            build_archive(path, [(root, "dir", 0o755, b""), (f"{root}/bondify", "file", 0o755, b"bin")])
+            with mock.patch.object(contract, "MAX_ARCHIVE_BYTES", path.stat().st_size - 1):
+                with self.assertRaises(ValueError):
+                    validate_archive(path)
+
+    def test_member_size_bound_rejected(self):
+        root = "bondify-linux-amd64"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / f"{root}.tar.gz"
+            build_archive(path, [(root, "dir", 0o755, b""), (f"{root}/bondify", "file", 0o755, b"bin")])
+            with mock.patch.object(contract, "MAX_MEMBER_BYTES", 2):
+                with self.assertRaises(ValueError):
+                    validate_archive(path)
+
+    def test_total_payload_size_bound_rejected(self):
+        root = "bondify-windows-amd64"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / f"{root}.tar.gz"
+            build_archive(
+                path,
+                [
+                    (root, "dir", 0o755, b""),
+                    (f"{root}/bondify.exe", "file", 0o755, b"exe"),
+                    (f"{root}/install.ps1", "file", 0o644, b"ps"),
+                ],
+            )
+            with mock.patch.object(contract, "MAX_TOTAL_PAYLOAD_BYTES", 4):
+                with self.assertRaises(ValueError):
+                    validate_archive(path)
 
 
 if __name__ == "__main__":
