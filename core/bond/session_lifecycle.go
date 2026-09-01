@@ -157,8 +157,17 @@ func sessionReapEligibleWithPaths(s *relaySession, paths []*Path, now time.Time,
 		if p.State() != sched.StateDead {
 			return false
 		}
-		if idle := p.LastActivityAt(now); idle > 0 {
-			at := now.Add(-idle)
+
+		// lastProbeAckAt==0 means this path has never observed authenticated traffic. Do
+		// not infer that state from LastActivityAt(now)==0: zero also means activity at
+		// exactly now (and, after a wall-clock rollback, activity timestamped slightly in
+		// the future). Treat any recorded future timestamp as activity at now so a clock
+		// discontinuity can delay reclamation but can never make a live session look older.
+		if lastNanos := p.lastProbeAckAt.Load(); lastNanos != 0 {
+			at := time.Unix(0, lastNanos)
+			if at.After(now) {
+				at = now
+			}
 			if at.After(latest) {
 				latest = at
 			}
