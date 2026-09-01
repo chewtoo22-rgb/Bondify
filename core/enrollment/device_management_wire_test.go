@@ -82,8 +82,7 @@ func TestRevokeDeviceWireIsAccountScoped(t *testing.T) {
 		}
 	}
 
-	payload := []byte(`{"device_id":"00112233445566778899aabbccddeeff"}`)
-	payload = bytes.ReplaceAll(payload, []byte{'\\'}, nil)
+	payload := []byte("{\"device_id\":\"00112233445566778899aabbccddeeff\"}")
 	if err := service.RevokeDeviceWire("acct-a", payload); err != nil {
 		t.Fatal(err)
 	}
@@ -99,14 +98,11 @@ func TestDecodeDeviceRevokeWireFailsClosed(t *testing.T) {
 	validID := "00112233445566778899aabbccddeeff"
 	tests := [][]byte{
 		nil,
-		[]byte(`{}`),
-		[]byte(`{"device_id":"bad"}`),
-		[]byte(`{"device_id":"` + validID + `","account_id":"acct-a"}`),
-		[]byte(`{"device_id":"` + validID + `"} {}`),
+		[]byte("{}"),
+		[]byte("{\"device_id\":\"bad\"}"),
+		[]byte("{\"device_id\":\"" + validID + "\",\"account_id\":\"acct-a\"}"),
+		[]byte("{\"device_id\":\"" + validID + "\"} {}"),
 		bytes.Repeat([]byte{'x'}, MaxDeviceRevokeWireBytes+1),
-	}
-	for i := 2; i < 5; i++ {
-		tests[i] = bytes.ReplaceAll(tests[i], []byte{'\\'}, nil)
 	}
 	for _, payload := range tests {
 		if _, err := DecodeDeviceRevokeWire(payload); !errors.Is(err, ErrDeviceManagementWire) {
@@ -120,8 +116,7 @@ func TestDeviceManagementWireNilServiceFailsClosed(t *testing.T) {
 	if _, err := service.ListDevicesWire("acct-a"); !errors.Is(err, ErrDeviceDirectory) {
 		t.Fatalf("list error = %v", err)
 	}
-	payload := []byte(`{"device_id":"00112233445566778899aabbccddeeff"}`)
-	payload = bytes.ReplaceAll(payload, []byte{'\\'}, nil)
+	payload := []byte("{\"device_id\":\"00112233445566778899aabbccddeeff\"}")
 	if err := service.RevokeDeviceWire("acct-a", payload); !errors.Is(err, ErrDeviceDirectory) {
 		t.Fatalf("revoke error = %v", err)
 	}
