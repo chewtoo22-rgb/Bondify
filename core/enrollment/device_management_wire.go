@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sort"
 	"time"
 )
 
@@ -20,7 +21,7 @@ var ErrDeviceManagementWire = errors.New("invalid device management wire payload
 // and Windows clients. Account identity is intentionally excluded because the
 // transport authenticates it separately.
 type DeviceInventory struct {
-	Version int                  `json:"version"`
+	Version int                   `json:"version"`
 	Devices []DeviceInventoryItem `json:"devices"`
 }
 
@@ -38,29 +39,35 @@ type DeviceRevokeRequest struct {
 	DeviceID string `json:"device_id"`
 }
 
-// EncodeDeviceInventory validates and serializes deterministic device inventory
-// without exposing account IDs or any enrollment credentials.
+// EncodeDeviceInventory validates, sorts, and serializes deterministic device
+// inventory without exposing account IDs or enrollment credentials.
 func EncodeDeviceInventory(records []DeviceRecord) ([]byte, error) {
 	if len(records) > DefaultMaxDevicesPerAccount {
 		return nil, ErrDeviceManagementWire
 	}
 
-	items := make([]DeviceInventoryItem, 0, len(records))
-	lastID := ""
+	normalized := make([]DeviceRecord, 0, len(records))
 	for _, record := range records {
-		normalized, err := normalizeDeviceRecord(record)
+		clean, err := normalizeDeviceRecord(record)
 		if err != nil {
 			return nil, ErrDeviceManagementWire
 		}
-		if lastID != "" && normalized.DeviceID <= lastID {
+		normalized = append(normalized, clean)
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i].DeviceID < normalized[j].DeviceID })
+
+	items := make([]DeviceInventoryItem, 0, len(normalized))
+	lastID := ""
+	for _, record := range normalized {
+		if lastID == record.DeviceID {
 			return nil, ErrDeviceManagementWire
 		}
-		lastID = normalized.DeviceID
+		lastID = record.DeviceID
 		items = append(items, DeviceInventoryItem{
-			DeviceID:   normalized.DeviceID,
-			Name:       normalized.Name,
-			Platform:   normalized.Platform,
-			EnrolledAt: normalized.EnrolledAt.UTC().Format(time.RFC3339Nano),
+			DeviceID:   record.DeviceID,
+			Name:       record.Name,
+			Platform:   record.Platform,
+			EnrolledAt: record.EnrolledAt.UTC().Format(time.RFC3339Nano),
 		})
 	}
 
