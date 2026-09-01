@@ -28,6 +28,9 @@ func OpenFileDeviceStore(path string, maxDevicesPerAccount int) (*FileDeviceStor
 	if path == "" {
 		return nil, fmt.Errorf("%w: empty path", ErrDeviceStore)
 	}
+	if err := validateDeviceStoreParent(path); err != nil {
+		return nil, err
+	}
 	registry, err := NewDeviceRegistry(maxDevicesPerAccount)
 	if err != nil {
 		return nil, err
@@ -111,6 +114,10 @@ func (s *FileDeviceStore) load() error {
 }
 
 func (s *FileDeviceStore) persistLocked() error {
+	if err := validateDeviceStoreParent(s.path); err != nil {
+		return err
+	}
+
 	devices := make([]DeviceRecord, 0)
 	for _, accountDevices := range s.registry.accounts {
 		for _, record := range accountDevices {
@@ -132,6 +139,9 @@ func (s *FileDeviceStore) persistLocked() error {
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("%w: create directory: %v", ErrDeviceStore, err)
+	}
+	if err := validateDeviceStoreParent(s.path); err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".bondify-devices-*")
 	if err != nil {
@@ -159,6 +169,49 @@ func (s *FileDeviceStore) persistLocked() error {
 		return fmt.Errorf("%w: replace: %v", ErrDeviceStore, err)
 	}
 	return nil
+}
+
+// validateDeviceStoreParent rejects any existing symlink in the directory chain
+// that contains the enrollment registry. This keeps an apparently local state
+// path from being redirected elsewhere by a symlinked ancestor. Missing suffix
+// directories are allowed because persistLocked creates them with restrictive
+// permissions before validating the chain again.
+func validateDeviceStoreParent(path string) error {
+	dir := filepath.Clean(filepath.Dir(path))
+	probe := dir
+	for {
+		info, err := os.Lstat(probe)
+		if err == nil {
+			if !info.IsDir() {
+				return fmt.Errorf("%w: state parent must be a directory", ErrDeviceStore)
+			}
+			resolved, err := filepath.EvalSymlinks(probe)
+			if err != nil {
+				return fmt.Errorf("%w: resolve state parent: %v", ErrDeviceStore, err)
+			}
+			absProbe, err := filepath.Abs(probe)
+			if err != nil {
+				return fmt.Errorf("%w: resolve state parent path: %v", ErrDeviceStore, err)
+			}
+			absResolved, err := filepath.Abs(resolved)
+			if err != nil {
+				return fmt.Errorf("%w: resolve state parent target: %v", ErrDeviceStore, err)
+			}
+			rel, err := filepath.Rel(absProbe, absResolved)
+			if err != nil || rel != "." {
+				return fmt.Errorf("%w: symlinked state parent is not allowed", ErrDeviceStore)
+			}
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%w: stat state parent: %v", ErrDeviceStore, err)
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return fmt.Errorf("%w: no existing state parent", ErrDeviceStore)
+		}
+		probe = parent
+	}
 }
 
 func cloneAccounts(src map[string]map[string]DeviceRecord) map[string]map[string]DeviceRecord {
