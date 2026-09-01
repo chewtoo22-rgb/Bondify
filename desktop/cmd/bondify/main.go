@@ -85,18 +85,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var paths []bond.PathSpec
-	for _, a := range strings.Split(*localAddrs, ",") {
-		if a = strings.TrimSpace(a); a != "" {
-			spec := bond.PathSpec{}
-			if idx := strings.IndexByte(a, '@'); idx >= 0 {
-				spec.LocalAddr = a[:idx]
-				spec.Device = a[idx+1:]
-			} else {
-				spec.LocalAddr = a
-			}
-			paths = append(paths, spec)
-		}
+	paths, err := parseLocalPathSpecs(*localAddrs)
+	if err != nil {
+		log.Fatalf("client: bad -local-addrs: %v", err)
 	}
 
 	sendMode, err := bond.ModeFromString(*mode)
