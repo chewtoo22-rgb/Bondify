@@ -156,6 +156,30 @@ func (s *ClaimStore) Consume(accountID, claimID string, secret []byte) error {
 	return s.ConsumeAndCommit(accountID, claimID, secret, nil)
 }
 
+// Revoke invalidates an outstanding claim for the separately authenticated
+// account. It intentionally does not require the claim secret: possession of a
+// leaked enrollment code must not prevent the account owner from cancelling it.
+// Cross-account and already-consumed/expired claims fail closed with the same
+// error so callers cannot use revocation as a claim-existence oracle.
+func (s *ClaimStore) Revoke(accountID, claimID string) error {
+	accountID, err := normalizeAccountID(accountID)
+	if err != nil || !validClaimID(claimID) {
+		return ErrClaimInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now().UTC()
+	s.pruneExpiredLocked(now)
+	record, ok := s.claims[claimID]
+	if !ok || record.accountID != accountID {
+		return ErrClaimInvalid
+	}
+	delete(s.claims, claimID)
+	return nil
+}
+
 // ConsumeAndCommit validates exclusive ownership of a one-time claim, executes
 // commit while that claim is reserved, and deletes the claim only after commit
 // succeeds. A failed durable write therefore does not burn a valid enrollment
