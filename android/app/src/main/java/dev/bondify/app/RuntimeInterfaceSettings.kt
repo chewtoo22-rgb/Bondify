@@ -6,16 +6,33 @@ package dev.bondify.app
  * unknown interface selectors fail closed instead of being silently ignored.
  *
  * [Selection] is intentionally a plain public value type because [Prefs] exposes it to callers;
- * the internal contract implementation remains hidden behind [fromStoredValues].
+ * the internal contract implementation remains hidden behind [fromStoredValues]. Direct
+ * construction is still admitted defensively so future Android callers cannot bypass the same
+ * mode/interface invariants by skipping [fromStoredValues].
  */
 object RuntimeInterfaceSettings {
     const val WIFI = "wifi"
     const val CELLULAR = "cellular"
 
+    private val knownInterfaces = setOf(WIFI, CELLULAR)
+    private val supportedModes = setOf("speed", "redundant")
+
     data class Selection(
         val modeWireValue: String,
         val enabledInterfaces: Set<String>,
     ) {
+        init {
+            require(modeWireValue in supportedModes) {
+                "Android runtime contains an unsupported bond mode"
+            }
+            require(enabledInterfaces.isNotEmpty()) {
+                "Android runtime requires at least one enabled interface"
+            }
+            require(enabledInterfaces.all { it in knownInterfaces }) {
+                "Android runtime contains an unsupported interface selector"
+            }
+        }
+
         fun isEnabled(interfaceId: String): Boolean = interfaceId in enabledInterfaces
     }
 
@@ -35,8 +52,7 @@ object RuntimeInterfaceSettings {
             )
         )
 
-        val known = setOf(WIFI, CELLULAR)
-        require(config.interfaces.all { it.id in known }) {
+        require(config.interfaces.all { it.id in knownInterfaces }) {
             "Android runtime contains an unsupported interface selector"
         }
 
