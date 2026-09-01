@@ -13,9 +13,10 @@ var (
 )
 
 // WriteSupportExportFile serializes a privacy-bounded support export and replaces
-// the destination atomically. The destination parent must already exist and must
-// not itself be a symlink. Existing symlink and non-regular destinations are
-// rejected so callers cannot redirect an export outside the reviewed path.
+// the destination atomically. The destination parent and every ancestor up to
+// the filesystem root must already exist as real directories rather than
+// symlinks. Existing symlink and non-regular destinations are rejected so
+// callers cannot redirect an export outside the reviewed path.
 //
 // The temporary file and containing directory are synced before success is
 // returned. This makes a reported successful export durable across an immediate
@@ -28,12 +29,8 @@ func WriteSupportExportFile(path string, snapshot Snapshot) error {
 	path = filepath.Clean(path)
 	dir := filepath.Dir(path)
 
-	parentInfo, err := os.Lstat(dir)
-	if err != nil {
-		return fmt.Errorf("inspect support export parent: %w", err)
-	}
-	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
-		return ErrSupportExportPathUnsafe
+	if err := validateSupportExportDirectoryChain(dir); err != nil {
+		return err
 	}
 
 	if info, err := os.Lstat(path); err == nil {
@@ -83,4 +80,21 @@ func WriteSupportExportFile(path string, snapshot Snapshot) error {
 		return fmt.Errorf("sync support export directory: %w", err)
 	}
 	return nil
+}
+
+func validateSupportExportDirectoryChain(dir string) error {
+	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return fmt.Errorf("inspect support export ancestor %q: %w", current, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return ErrSupportExportPathUnsafe
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+	}
 }
