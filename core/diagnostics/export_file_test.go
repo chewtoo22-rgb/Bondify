@@ -120,6 +120,31 @@ func TestWriteSupportExportFileRejectsSymlinkParent(t *testing.T) {
 	}
 }
 
+func TestWriteSupportExportFileRejectsSymlinkedAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated Windows privileges")
+	}
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	realNested := filepath.Join(realDir, "nested")
+	linkDir := filepath.Join(root, "link")
+	if err := os.MkdirAll(realNested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(linkDir, "nested", "support.json")
+	err := WriteSupportExportFile(path, Snapshot{})
+	if !errors.Is(err, ErrSupportExportPathUnsafe) {
+		t.Fatalf("error = %v, want ErrSupportExportPathUnsafe", err)
+	}
+	if _, err := os.Stat(filepath.Join(realNested, "support.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected export through symlinked ancestor: %v", err)
+	}
+}
+
 func TestWriteSupportExportFileRejectsNonRegularDestination(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "support.json")
