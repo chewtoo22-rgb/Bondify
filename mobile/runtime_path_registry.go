@@ -77,7 +77,3 @@ func (r *runtimePathRegistry) lookup(label string) (uint8, bool) {
 	id, ok := r.labelToID[label]
 	return id, ok
 }
-
-func (r *runtimePathRegistry) remove(label string) {
-	delete(r.labelToID, label)
-}
