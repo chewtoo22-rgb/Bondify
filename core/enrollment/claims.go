@@ -41,6 +41,7 @@ type claimRecord struct {
 	accountID  string
 	secretHash [32]byte
 	expiresAt  time.Time
+	reserved   bool
 }
 
 // ClaimStore is an in-memory, bounded, concurrency-safe registry for short-lived
@@ -159,8 +160,8 @@ func (s *ClaimStore) Consume(accountID, claimID string, secret []byte) error {
 // Revoke invalidates an outstanding claim for the separately authenticated
 // account. It intentionally does not require the claim secret: possession of a
 // leaked enrollment code must not prevent the account owner from cancelling it.
-// Cross-account and already-consumed/expired claims fail closed with the same
-// error so callers cannot use revocation as a claim-existence oracle.
+// Cross-account, reserved, and already-consumed/expired claims fail closed with
+// the same error so callers cannot use revocation as a claim-existence oracle.
 func (s *ClaimStore) Revoke(accountID, claimID string) error {
 	accountID, err := normalizeAccountID(accountID)
 	if err != nil || !validClaimID(claimID) {
@@ -173,52 +174,70 @@ func (s *ClaimStore) Revoke(accountID, claimID string) error {
 	now := s.now().UTC()
 	s.pruneExpiredLocked(now)
 	record, ok := s.claims[claimID]
-	if !ok || record.accountID != accountID {
+	if !ok || record.accountID != accountID || record.reserved {
 		return ErrClaimInvalid
 	}
 	delete(s.claims, claimID)
 	return nil
 }
 
-// ConsumeAndCommit validates exclusive ownership of a one-time claim, executes
-// commit while that claim is reserved, and deletes the claim only after commit
-// succeeds. A failed durable write therefore does not burn a valid enrollment
-// claim. commit must be bounded local work; callers must not perform network I/O
-// while the claim-store lock is held.
+// ConsumeAndCommit validates exclusive ownership of a one-time claim, reserves
+// only that claim, then executes commit without holding the store-wide mutex.
+// This keeps unrelated claim issuance/revocation/consumption responsive while a
+// bounded local durable write is in progress. A failed commit releases the
+// reservation when the claim is still valid; a successful commit burns it.
 func (s *ClaimStore) ConsumeAndCommit(accountID, claimID string, secret []byte, commit func() error) error {
 	accountID, err := normalizeAccountID(accountID)
 	if err != nil || !validClaimID(claimID) || len(secret) < MinClaimSecretBytes || len(secret) > MaxClaimSecretBytes {
 		return ErrClaimInvalid
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	providedHash := sha256.Sum256(secret)
 
+	s.mu.Lock()
 	now := s.now().UTC()
 	s.pruneExpiredLocked(now)
 	record, ok := s.claims[claimID]
-	if !ok || record.accountID != accountID {
+	if !ok || record.accountID != accountID || record.reserved || subtle.ConstantTimeCompare(providedHash[:], record.secretHash[:]) != 1 {
+		s.mu.Unlock()
 		return ErrClaimInvalid
 	}
+	record.reserved = true
+	s.claims[claimID] = record
+	s.mu.Unlock()
 
-	providedHash := sha256.Sum256(secret)
-	if subtle.ConstantTimeCompare(providedHash[:], record.secretHash[:]) != 1 {
-		return ErrClaimInvalid
-	}
-
+	var commitErr error
 	if commit != nil {
-		if err := commit(); err != nil {
-			return err
-		}
+		commitErr = commit()
 	}
 
-	delete(s.claims, claimID)
-	return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record, ok = s.claims[claimID]
+	if !ok || !record.reserved {
+		// Reserved records are never pruned or revoked, so this is an internal
+		// fail-closed guard against future mutation paths violating that rule.
+		return ErrClaimInvalid
+	}
+	if commitErr == nil {
+		delete(s.claims, claimID)
+		return nil
+	}
+
+	now = s.now().UTC()
+	if !now.Before(record.expiresAt) {
+		delete(s.claims, claimID)
+	} else {
+		record.reserved = false
+		s.claims[claimID] = record
+	}
+	return commitErr
 }
 
 func (s *ClaimStore) pruneExpiredLocked(now time.Time) {
 	for id, record := range s.claims {
-		if !now.Before(record.expiresAt) {
+		if !record.reserved && !now.Before(record.expiresAt) {
 			delete(s.claims, id)
 		}
 	}
