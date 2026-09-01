@@ -18,6 +18,11 @@ var (
 // symlinks. Existing symlink and non-regular destinations are rejected so
 // callers cannot redirect an export outside the reviewed path.
 //
+// The directory chain is revalidated immediately before temporary-file creation
+// and again before the final replacement. This prevents a caller-visible path
+// that was safe at admission time from being silently redirected by a parent
+// symlink swap while serialization or disk I/O is in progress.
+//
 // The temporary file and containing directory are synced before success is
 // returned. This makes a reported successful export durable across an immediate
 // crash or power loss instead of merely durable in the process page cache.
@@ -46,6 +51,13 @@ func WriteSupportExportFile(path string, snapshot Snapshot) error {
 		return err
 	}
 
+	// Serialization can be non-trivial relative to a filesystem rename. Do not
+	// rely on the admission-time directory check when choosing where to create
+	// the privacy-sensitive temporary export.
+	if err := validateSupportExportDirectoryChain(dir); err != nil {
+		return err
+	}
+
 	tmp, err := os.CreateTemp(dir, ".bondify-support-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create support export temp file: %w", err)
@@ -70,6 +82,13 @@ func WriteSupportExportFile(path string, snapshot Snapshot) error {
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close support export: %w", err)
+	}
+
+	// A parent directory may be replaced after the temporary file was created.
+	// Revalidate before using path-based replacement so a late symlink swap
+	// fails closed instead of redirecting the committed support export.
+	if err := validateSupportExportDirectoryChain(dir); err != nil {
+		return err
 	}
 	if err := replaceSupportExportFile(tmpName, path); err != nil {
 		return fmt.Errorf("commit support export: %w", err)
