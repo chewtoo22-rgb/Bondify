@@ -9,6 +9,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'pe-machine.ps1')
+
 $archive = (Resolve-Path -LiteralPath $ArchivePath).Path
 $checksum = (Resolve-Path -LiteralPath $ChecksumPath).Path
 
@@ -29,6 +31,10 @@ $archiveName = [System.IO.Path]::GetFileName($archive)
 if ($manifestName -ne $archiveName) {
     throw "Checksum manifest targets '$manifestName', expected '$archiveName'."
 }
+if ($archiveName -notmatch '^bondify-windows-(amd64|arm64)\.tar\.gz$') {
+    throw "Windows release archive name does not declare a supported architecture: $archiveName"
+}
+$declaredArchitecture = $Matches[1].ToLowerInvariant()
 
 $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualHash -ne $expectedHash) {
@@ -73,6 +79,11 @@ try {
         throw "Release archive must contain exactly one top-level directory; found $($roots.Count)."
     }
 
+    $expectedRootName = $archiveName.Substring(0, $archiveName.Length - '.tar.gz'.Length)
+    if ($roots[0].Name -ne $expectedRootName) {
+        throw "Release archive root '$($roots[0].Name)' does not match archive identity '$expectedRootName'."
+    }
+
     $root = $roots[0].FullName
     $exe = Join-Path $root 'bondify.exe'
     $installer = Join-Path $root 'install.ps1'
@@ -87,10 +98,7 @@ try {
         throw "Release archive contains unexpected top-level files: $($unexpected.Name -join ', ')"
     }
 
-    $header = [System.IO.File]::ReadAllBytes($exe)
-    if ($header.Length -lt 2 -or $header[0] -ne 0x4d -or $header[1] -ne 0x5a) {
-        throw 'bondify.exe does not have a valid Windows PE MZ header.'
-    }
+    $machine = Assert-BondifyPEMachine -Path $exe -Architecture $declaredArchitecture
 
     $help = & $exe -h 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
@@ -107,7 +115,7 @@ try {
         throw "Packaged installer contract failed with exit code $LASTEXITCODE."
     }
 
-    Write-Host "Windows release artifact acceptance: PASS ($archiveName, sha256=$actualHash)"
+    Write-Host ('Windows release artifact acceptance: PASS ({0}, arch={1}, machine=0x{2:x4}, sha256={3})' -f $archiveName, $declaredArchitecture, $machine, $actualHash)
 }
 finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
