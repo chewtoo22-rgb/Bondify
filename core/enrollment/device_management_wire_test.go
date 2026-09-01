@@ -83,6 +83,7 @@ func TestRevokeDeviceWireIsAccountScoped(t *testing.T) {
 	}
 
 	payload := []byte(`{"device_id":"00112233445566778899aabbccddeeff"}`)
+	payload = bytes.ReplaceAll(payload, []byte{'\\'}, nil)
 	if err := service.RevokeDeviceWire("acct-a", payload); err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +105,9 @@ func TestDecodeDeviceRevokeWireFailsClosed(t *testing.T) {
 		[]byte(`{"device_id":"` + validID + `"} {}`),
 		bytes.Repeat([]byte{'x'}, MaxDeviceRevokeWireBytes+1),
 	}
+	for i := 2; i < 5; i++ {
+		tests[i] = bytes.ReplaceAll(tests[i], []byte{'\\'}, nil)
+	}
 	for _, payload := range tests {
 		if _, err := DecodeDeviceRevokeWire(payload); !errors.Is(err, ErrDeviceManagementWire) {
 			t.Fatalf("payload %q error = %v", payload, err)
@@ -117,6 +121,7 @@ func TestDeviceManagementWireNilServiceFailsClosed(t *testing.T) {
 		t.Fatalf("list error = %v", err)
 	}
 	payload := []byte(`{"device_id":"00112233445566778899aabbccddeeff"}`)
+	payload = bytes.ReplaceAll(payload, []byte{'\\'}, nil)
 	if err := service.RevokeDeviceWire("acct-a", payload); !errors.Is(err, ErrDeviceDirectory) {
 		t.Fatalf("revoke error = %v", err)
 	}
