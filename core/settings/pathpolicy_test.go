@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/chewtoo22-rgb/Bondify/core/pathpolicy"
+	"github.com/chewtoo22-rgb/bondify/core/pathpolicy"
 )
 
 func TestAdmitPathPolicyCarriesOnlyEnabledInterfaces(t *testing.T) {
