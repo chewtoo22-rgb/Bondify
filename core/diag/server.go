@@ -111,7 +111,7 @@ func NewServer(addr string, snap Snapshot) (*Server, error) {
 
 	return &Server{
 		http: &http.Server{
-			Handler:           mux,
+			Handler:           loopbackHostGuard(mux),
 			ReadHeaderTimeout: 5 * time.Second,
 		},
 		ln: ln,
