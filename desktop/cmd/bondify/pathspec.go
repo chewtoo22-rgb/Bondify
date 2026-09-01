@@ -57,6 +57,21 @@ func parseLocalPathSpecs(raw string) ([]bond.PathSpec, error) {
 		if ip == nil {
 			return nil, fmt.Errorf("local path %d has invalid bind IP %q", i+1, addrText)
 		}
+		// net.IP.String canonicalizes IPv4-mapped IPv6 addresses to ordinary IPv4.
+		// Reject that alternate spelling before canonicalization so one physical bind
+		// identity cannot be supplied through two address families.
+		if strings.Contains(addrText, ":") && ip.To4() != nil {
+			return nil, fmt.Errorf("local path %d uses an IPv4-mapped IPv6 bind address", i+1)
+		}
+		if ip.IsMulticast() {
+			return nil, fmt.Errorf("local path %d uses multicast bind address %q", i+1, addrText)
+		}
+		// Link-local IPv6 addresses are scoped to an interface. Requiring an explicit
+		// device prevents Windows/Linux from choosing a different NIC when multiple
+		// uplinks expose the same fe80::/10 address space.
+		if ip.To4() == nil && ip.IsLinkLocalUnicast() && device == "" {
+			return nil, fmt.Errorf("local path %d link-local IPv6 bind address requires a pinned device", i+1)
+		}
 		addr := ip.String()
 
 		pairKey := addr + "\x00" + device
