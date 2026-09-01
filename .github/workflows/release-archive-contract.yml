@@ -1,0 +1,33 @@
+name: Release Archive Contract
+
+on:
+  pull_request:
+    paths:
+      - 'qa/release_archive_contract.py'
+      - 'qa/test_release_archive_contract.py'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/release-archive-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  archive-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile validator
+        run: python3 -m py_compile qa/release_archive_contract.py qa/test_release_archive_contract.py
+      - name: Run hostile archive regressions
+        run: python3 -m unittest discover -s qa -p 'test_release_archive_contract.py' -v
+      - name: Reject execution and network coupling
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('qa/release_archive_contract.py').read_text()
+          forbidden = ('subprocess', 'os.system', 'socket', 'urllib', 'requests', 'http.client')
+          found = [token for token in forbidden if token in source]
+          if found:
+              raise SystemExit(f'forbidden dependency in archive validator: {found}')
+          PY
