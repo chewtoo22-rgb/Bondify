@@ -1,6 +1,6 @@
 package settings
 
-import "github.com/chewtoo22-rgb/Bondify/core/pathpolicy"
+import "github.com/chewtoo22-rgb/bondify/core/pathpolicy"
 
 // AdmissionPolicy converts an already admitted runtime configuration into the
 // canonical path-admission policy consumed by Android and Windows networking
