@@ -25,12 +25,19 @@ func NewFileStore(path string) (*FileStore, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("settings: store path must be absolute")
 	}
-	return &FileStore{path: filepath.Clean(path)}, nil
+	path = filepath.Clean(path)
+	if err := validateStoreParent(path); err != nil {
+		return nil, err
+	}
+	return &FileStore{path: path}, nil
 }
 
 func (s *FileStore) Load() (Config, error) {
 	if s == nil {
 		return Config{}, errors.New("settings: nil file store")
+	}
+	if err := validateStoreParent(s.path); err != nil {
+		return Config{}, err
 	}
 	info, err := os.Lstat(s.path)
 	if err != nil {
@@ -77,6 +84,9 @@ func (s *FileStore) Save(cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if err := validateStoreParent(s.path); err != nil {
+		return err
+	}
 
 	if info, err := os.Lstat(s.path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
@@ -98,6 +108,9 @@ func (s *FileStore) Save(cfg Config) error {
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("settings: create store directory: %w", err)
+	}
+	if err := validateStoreParent(s.path); err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".bondify-settings-*")
 	if err != nil {
@@ -134,4 +147,46 @@ func (s *FileStore) Save(cfg Config) error {
 		_ = dirFD.Close()
 	}
 	return nil
+}
+
+// validateStoreParent rejects any existing symlink in the directory chain that
+// contains the settings file. Missing suffix directories are allowed because
+// Save creates them with restrictive permissions and validates the chain again
+// before creating the temporary file.
+func validateStoreParent(path string) error {
+	dir := filepath.Clean(filepath.Dir(path))
+	probe := dir
+	for {
+		info, err := os.Lstat(probe)
+		if err == nil {
+			if !info.IsDir() {
+				return errors.New("settings: store parent must be a directory")
+			}
+			resolved, err := filepath.EvalSymlinks(probe)
+			if err != nil {
+				return fmt.Errorf("settings: resolve store parent: %w", err)
+			}
+			absProbe, err := filepath.Abs(probe)
+			if err != nil {
+				return fmt.Errorf("settings: resolve store parent path: %w", err)
+			}
+			absResolved, err := filepath.Abs(resolved)
+			if err != nil {
+				return fmt.Errorf("settings: resolve store parent target: %w", err)
+			}
+			rel, err := filepath.Rel(absProbe, absResolved)
+			if err != nil || rel != "." {
+				return errors.New("settings: symlinked store parent is not allowed")
+			}
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("settings: stat store parent: %w", err)
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return errors.New("settings: no existing store parent")
+		}
+		probe = parent
+	}
 }
