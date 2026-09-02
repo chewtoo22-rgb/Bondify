@@ -8,9 +8,23 @@ package nat
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"regexp"
 )
+
+var validInterfaceName = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+
+func validateInputs(tunnelCIDR, egressIface string) error {
+	if _, _, err := net.ParseCIDR(tunnelCIDR); err != nil {
+		return fmt.Errorf("nat: invalid tunnel CIDR: %w", err)
+	}
+	if !validInterfaceName.MatchString(egressIface) || egressIface == "." || egressIface == ".." {
+		return fmt.Errorf("nat: invalid egress interface %q", egressIface)
+	}
+	return nil
+}
 
 // EnableForwarding sets net.ipv4.ip_forward=1, required for the relay to route decrypted
 // tunnel packets out to the internet and back.
@@ -22,6 +36,9 @@ func EnableForwarding() error {
 // egressIface get the relay's public source address, and returns a func that removes the
 // same rule (best-effort cleanup on shutdown).
 func Masquerade(tunnelCIDR, egressIface string) (cleanup func(), err error) {
+	if err := validateInputs(tunnelCIDR, egressIface); err != nil {
+		return nil, err
+	}
 	add := []string{"-t", "nat", "-A", "POSTROUTING", "-s", tunnelCIDR, "-o", egressIface, "-j", "MASQUERADE"}
 	del := []string{"-t", "nat", "-D", "POSTROUTING", "-s", tunnelCIDR, "-o", egressIface, "-j", "MASQUERADE"}
 	if out, err := exec.Command("iptables", add...).CombinedOutput(); err != nil {
