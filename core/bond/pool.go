@@ -17,6 +17,7 @@ type IPPool struct {
 	next     uint32
 	end      uint32
 	released []uint32
+	inUse    map[uint32]struct{}
 }
 
 func NewIPPool(cidr string) (*IPPool, error) {
@@ -38,6 +39,7 @@ func NewIPPool(cidr string) (*IPPool, error) {
 		network: network,
 		next:    base + 2, // base+1 reserved for the relay gateway itself
 		end:     base + size - 1,
+		inUse:   make(map[uint32]struct{}),
 	}, nil
 }
 
@@ -61,6 +63,7 @@ func (p *IPPool) Allocate() (net.IP, error) {
 	if n := len(p.released); n > 0 {
 		v := p.released[n-1]
 		p.released = p.released[:n-1]
+		p.inUse[v] = struct{}{}
 		return uint32ToIP(v), nil
 	}
 	if p.next > p.end {
@@ -68,18 +71,25 @@ func (p *IPPool) Allocate() (net.IP, error) {
 	}
 	v := p.next
 	p.next++
+	p.inUse[v] = struct{}{}
 	return uint32ToIP(v), nil
 }
 
-// Release returns an address to the pool.
+// Release returns an address to the pool only if this pool currently owns it.
+// Unknown, out-of-range, gateway, broadcast, and duplicate releases are ignored.
 func (p *IPPool) Release(ip net.IP) {
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return
 	}
+	v := binary.BigEndian.Uint32(ip4)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.released = append(p.released, binary.BigEndian.Uint32(ip4))
+	if _, ok := p.inUse[v]; !ok {
+		return
+	}
+	delete(p.inUse, v)
+	p.released = append(p.released, v)
 }
 
 func uint32ToIP(v uint32) net.IP {
