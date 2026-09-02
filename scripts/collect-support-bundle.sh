@@ -4,6 +4,14 @@ set -euo pipefail
 DIAG_URL="${BONDIFY_DIAG_URL:-http://127.0.0.1:9090/api/v1/diagnostics/redacted}"
 OUT_DIR="${1:-bondify-support-$(date -u +%Y%m%dT%H%M%SZ)}"
 
+case "$DIAG_URL" in
+  http://127.0.0.1:*|http://localhost:*|http://\[::1\]:*) ;;
+  *)
+    echo "Refusing non-loopback diagnostics URL: $DIAG_URL" >&2
+    exit 2
+    ;;
+esac
+
 umask 077
 mkdir -p "$OUT_DIR"
 
