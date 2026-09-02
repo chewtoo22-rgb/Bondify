@@ -159,12 +159,10 @@ type Tunnel struct {
 	done   chan struct{}
 	runErr error
 
-	// labelToID and nextID back this Tunnel's own AddPathFD/DropPathLabel: label lets
-	// Kotlin keep addressing a physical uplink ("wifi", "cellular") the way it already does
-	// in TunnelBuilder, without tracking core/bond's raw path IDs itself. nextID starts
-	// past every ID Handshake already assigned from TunnelBuilder.paths.
-	labelToID map[string]uint8
-	nextID    uint8
+	// pathRegistry lets Kotlin keep addressing physical uplinks by stable labels while the
+	// protocol uses uint8 IDs. Reservations span fd adoption and PATH_ADD so concurrent
+	// ConnectivityManager callbacks cannot double-register a label or collide after ID wrap.
+	pathRegistry runtimePathRegistry
 }
 
 // Handshake performs the Noise handshake and PATH_ADD registration over the path(s) already
@@ -213,11 +211,6 @@ func (b *TunnelBuilder) Handshake() (*Tunnel, error) {
 		pathErrs += perr.Error()
 	}
 
-	labelToID := make(map[string]uint8, len(b.labels))
-	for i, label := range b.labels {
-		labelToID[label] = uint8(i)
-	}
-
 	return &Tunnel{
 		SessionIndexHex: fmt.Sprintf("%08x", resp.SessionIndex),
 		TunnelIP:        resp.TunnelIP,
@@ -229,8 +222,7 @@ func (b *TunnelBuilder) Handshake() (*Tunnel, error) {
 		cancel:          cancel,
 		t:               t,
 		done:            make(chan struct{}),
-		labelToID:       labelToID,
-		nextID:          uint8(len(b.paths)),
+		pathRegistry:    newRuntimePathRegistry(b.labels),
 	}, nil
 }
 
@@ -291,28 +283,33 @@ const addPathHandshakeTimeout = 5 * time.Second
 // paths. This is what lets BondifyVpnService.kt react to a ConnectivityManager
 // NetworkCallback.onAvailable firing after Handshake already completed (Wi-Fi returning from
 // a dead zone, cellular finishing a slow radio handover) instead of that uplink simply never
-// joining the bond for the rest of the session. fd is consumed exactly like
-// TunnelBuilder.AddPathFD's. label must not already be registered -- call DropPathLabel
-// first if replacing an existing one under the same label.
+// joining the bond for the rest of the session. label and a protocol path ID are reserved
+// before the fd is adopted, so duplicate callbacks fail without consuming the caller's fd.
 func (tu *Tunnel) AddPathFD(fd int, label string) error {
 	if err := validatePathLabel(label); err != nil {
 		return err
 	}
+
+	tu.mu.Lock()
+	id, err := tu.pathRegistry.reserve(label)
+	parent := tu.ctx
+	tu.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	releaseReservation := true
+	defer func() {
+		if releaseReservation {
+			tu.mu.Lock()
+			tu.pathRegistry.release(label, id)
+			tu.mu.Unlock()
+		}
+	}()
+
 	udpConn, err := adoptUDPFd(fd, label)
 	if err != nil {
 		return err
 	}
-
-	tu.mu.Lock()
-	if _, exists := tu.labelToID[label]; exists {
-		tu.mu.Unlock()
-		_ = udpConn.Close()
-		return fmt.Errorf("mobile: path %q already registered; call DropPathLabel first", label)
-	}
-	id := tu.nextID
-	tu.nextID++
-	parent := tu.ctx
-	tu.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(parent, addPathHandshakeTimeout)
 	defer cancel()
@@ -321,8 +318,9 @@ func (tu *Tunnel) AddPathFD(fd int, label string) error {
 	}
 
 	tu.mu.Lock()
-	tu.labelToID[label] = id
+	tu.pathRegistry.commit(label, id)
 	tu.mu.Unlock()
+	releaseReservation = false
 	return nil
 }
 
@@ -332,9 +330,9 @@ func (tu *Tunnel) AddPathFD(fd int, label string) error {
 // NetworkCallback.onLost in BondifyVpnService.kt.
 func (tu *Tunnel) DropPathLabel(label string) error {
 	tu.mu.Lock()
-	id, ok := tu.labelToID[label]
+	id, ok := tu.pathRegistry.lookup(label)
 	if ok {
-		delete(tu.labelToID, label)
+		delete(tu.pathRegistry.labelToID, label)
 	}
 	tu.mu.Unlock()
 	if !ok {
