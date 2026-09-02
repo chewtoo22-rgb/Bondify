@@ -1,0 +1,26 @@
+name: Reorder Deadline Boundary
+
+on:
+  pull_request:
+    paths:
+      - 'core/reorder/**'
+      - '.github/workflows/reorder-deadline-boundary.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'core/reorder/**'
+      - '.github/workflows/reorder-deadline-boundary.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  reorder-deadline-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./core/reorder
