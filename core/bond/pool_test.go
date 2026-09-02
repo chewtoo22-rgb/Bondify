@@ -25,8 +25,15 @@ func TestIPPoolReleaseIgnoresUnknownAndDuplicateAddresses(t *testing.T) {
 	if !reused.Equal(first) {
 		t.Fatalf("reused %s, want %s", reused, first)
 	}
+	second, err := p.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Equal(first) {
+		t.Fatalf("second allocation reused %s", first)
+	}
 	if _, err := p.Allocate(); err == nil {
-		t.Fatal("expected pool to remain exhausted after ignoring non-owned releases")
+		t.Fatal("expected pool to be exhausted after allocating both owned addresses")
 	}
 }
 
@@ -44,4 +51,4 @@ func TestIPPoolReleasesOnlyOwnedAddresses(t *testing.T) {
 	if !got.Equal(net.ParseIP("192.168.44.2")) {
 		t.Fatalf("got %s, want first alloc 192.168.44.2", got)
 	}
-}
+} 
