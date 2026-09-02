@@ -33,6 +33,50 @@ param(
 $ErrorActionPreference = "Stop"
 $start = Get-Date
 
+function Assert-RelayInputs {
+    param(
+        [Parameter(Mandatory = $true)][string]$Address,
+        [Parameter(Mandatory = $true)][string]$PublicKey
+    )
+
+    if ($Address.Length -gt 255 -or $Address -match '[\x00-\x1F\x7F\s]') {
+        throw "RelayAddr contains whitespace/control characters or exceeds 255 characters."
+    }
+
+    $host = $null
+    $port = $null
+    if ($Address -match '^\[(?<ipv6>[0-9A-Fa-f:]+)\]:(?<port>[0-9]{1,5})$') {
+        $host = $Matches.ipv6
+        $port = [int]$Matches.port
+    } elseif ($Address -match '^(?<hostname>[A-Za-z0-9][A-Za-z0-9.-]*):(?<port>[0-9]{1,5})$') {
+        $host = $Matches.hostname
+        $port = [int]$Matches.port
+    } else {
+        throw "RelayAddr must be host:port or [IPv6]:port."
+    }
+
+    if ($port -lt 1 -or $port -gt 65535) {
+        throw "RelayAddr port must be in 1..65535."
+    }
+    if ([string]::IsNullOrWhiteSpace($host) -or $host.StartsWith('.') -or $host.EndsWith('.')) {
+        throw "RelayAddr host is malformed."
+    }
+
+    if ($PublicKey.Length -ne 44 -or $PublicKey -notmatch '^[A-Za-z0-9+/]{43}=$') {
+        throw "RelayPubKey must be a canonical base64-encoded 32-byte public key."
+    }
+    try {
+        $decoded = [Convert]::FromBase64String($PublicKey)
+    } catch {
+        throw "RelayPubKey is not valid base64."
+    }
+    if ($decoded.Length -ne 32) {
+        throw "RelayPubKey must decode to exactly 32 bytes."
+    }
+}
+
+Assert-RelayInputs -Address $RelayAddr -PublicKey $RelayPubKey
+
 # --- Single UAC prompt: re-launch elevated exactly once, then stop. ---------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 if (-not $isAdmin) {
