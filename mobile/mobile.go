@@ -34,8 +34,6 @@ import (
 	"github.com/chewtoo22-rgb/bondify/core/tun"
 )
 
-// GenerateKey returns a fresh base64-encoded Curve25519 private key, for first-run
-// onboarding (before a TunnelBuilder is ever constructed).
 func GenerateKey() (string, error) {
 	kp, err := crypto.GenerateKeypair()
 	if err != nil {
@@ -44,9 +42,6 @@ func GenerateKey() (string, error) {
 	return crypto.EncodeKey(kp.Private), nil
 }
 
-// PublicKeyFor derives and base64-encodes the public key matching a base64-encoded private
-// key, so the app can display "your device's public key" without round-tripping through the
-// relay first.
 func PublicKeyFor(privB64 string) (string, error) {
 	priv, err := crypto.DecodeKey(privB64)
 	if err != nil {
@@ -55,10 +50,6 @@ func PublicKeyFor(privB64 string) (string, error) {
 	return crypto.EncodeKey(crypto.DerivePublic(priv)), nil
 }
 
-// TunnelBuilder accumulates path sockets one at a time before Handshake, since gomobile bind
-// cannot marshal a Kotlin-constructed slice of bound structs (or of raw fds) across the JNI
-// boundary reliably -- an imperative AddPath/AddPathFD builder using only plain ints/strings
-// sidesteps that entirely.
 type TunnelBuilder struct {
 	relayAddr   string
 	relayPubKey [crypto.KeyLen]byte
@@ -67,16 +58,10 @@ type TunnelBuilder struct {
 	mode        string
 	fec         bool
 
-	paths []bond.PathSpec
-	// labels is parallel to paths, carried into the resulting Tunnel so its later
-	// AddPathFD/DropPathLabel calls (runtime path churn after Handshake) can address these
-	// initial paths by the same human-readable label ("wifi", "cellular") Kotlin already
-	// uses, instead of needing to track raw path IDs itself.
+	paths  []bond.PathSpec
 	labels []string
 }
 
-// NewTunnelBuilder starts configuring one tunnel attempt. clientKeyB64 is this device's own
-// private key (from GenerateKey, persisted by the app across runs).
 func NewTunnelBuilder(relayAddr, relayPubKeyB64, clientKeyB64, scheduler, mode string, fec bool) (*TunnelBuilder, error) {
 	relayPub, err := crypto.DecodeKey(relayPubKeyB64)
 	if err != nil {
@@ -96,12 +81,6 @@ func NewTunnelBuilder(relayAddr, relayPubKeyB64, clientKeyB64, scheduler, mode s
 	}, nil
 }
 
-// AddPathFD adds one uplink whose socket Kotlin has already dialed to relayAddr, bound to a
-// specific Network (Wi-Fi or cellular), and passed to VpnService.protect -- see this
-// package's doc comment. fd is consumed (the returned *net.UDPConn owns it); the caller must
-// not use it again after this call. label is a human-readable name (e.g. "wifi", "cellular")
-// that the resulting Tunnel's own AddPathFD/DropPathLabel use to address this same physical
-// uplink later, across churn (see Tunnel's doc comment).
 func (b *TunnelBuilder) AddPathFD(fd int, label string) error {
 	if err := validatePathLabel(label); err != nil {
 		return err
@@ -118,16 +97,13 @@ func (b *TunnelBuilder) AddPathFD(fd int, label string) error {
 	return nil
 }
 
-// adoptUDPFd wraps a Kotlin-dialed, network-bound, VpnService.protect()ed file descriptor as
-// a *net.UDPConn. fd is consumed either way -- os.NewFile takes no ownership until FileConn
-// dup()s it, at which point the original is closed regardless of outcome.
 func adoptUDPFd(fd int, label string) (*net.UDPConn, error) {
 	f := os.NewFile(uintptr(fd), label)
 	if f == nil {
 		return nil, fmt.Errorf("mobile: invalid fd %d for path %q", fd, label)
 	}
 	conn, err := net.FileConn(f)
-	_ = f.Close() // FileConn dup()s the descriptor; our copy is no longer needed either way
+	_ = f.Close()
 	if err != nil {
 		return nil, fmt.Errorf("mobile: adopt fd for path %q: %w", label, err)
 	}
@@ -139,18 +115,13 @@ func adoptUDPFd(fd int, label string) (*net.UDPConn, error) {
 	return udpConn, nil
 }
 
-// Tunnel wraps one client tunnel for BondifyVpnService: one instance per VPN session, torn
-// down as a unit by Close. The exported fields are filled in by Handshake and are what a
-// separate result struct would otherwise have carried -- gomobile bind only allows a bound
-// method to return one non-error value, so the session-establishment result rides along on
-// the same object AttachTUN/AwaitExit/Close/DiagnosticsJSON already operate on.
 type Tunnel struct {
 	SessionIndexHex string
 	TunnelIP        string
 	Prefix          int
 	GatewayIP       string
 	MTU             int
-	PathErrors      string // newline-joined; empty if every requested path joined cleanly
+	PathErrors      string
 
 	mu     sync.Mutex
 	ctx    context.Context
@@ -159,22 +130,9 @@ type Tunnel struct {
 	done   chan struct{}
 	runErr error
 
-	// labelToID and nextID back this Tunnel's own AddPathFD/DropPathLabel: label lets
-	// Kotlin keep addressing a physical uplink ("wifi", "cellular") the way it already does
-	// in TunnelBuilder, without tracking core/bond's raw path IDs itself. nextID starts
-	// past every ID Handshake already assigned from TunnelBuilder.paths.
-	labelToID map[string]uint8
-	nextID    uint8
+	pathRegistry runtimePathRegistry
 }
 
-// Handshake performs the Noise handshake and PATH_ADD registration over the path(s) already
-// added via AddPathFD, and returns once a session is established (or definitively fails).
-// The returned Tunnel is not yet running -- its TunnelIP/Prefix/GatewayIP/MTU fields are
-// populated so BondifyVpnService can build its VpnService.Builder with the *real* assigned
-// address (Android's interface can't be reconfigured after establish(), unlike a Linux TUN
-// device's IP/routes which are set well after the device itself opens -- see
-// core/bond.AttachTUN's doc comment for the same split on the Go side), then call this
-// Tunnel's AttachTUN with the resulting fd to actually start the packet pump.
 func (b *TunnelBuilder) Handshake() (*Tunnel, error) {
 	if len(b.paths) == 0 {
 		return nil, fmt.Errorf("mobile: no paths added (call AddPathFD at least once)")
@@ -185,8 +143,6 @@ func (b *TunnelBuilder) Handshake() (*Tunnel, error) {
 	}
 	fec := b.fec
 	if fec && sendMode == bond.ModeRedundant {
-		// See desktop/cmd/bondify/main.go's identical guard: REDUNDANT never uses FEC, so
-		// leaving it on here would just pay its per-packet copy cost for nothing.
 		fec = false
 	}
 
@@ -213,11 +169,6 @@ func (b *TunnelBuilder) Handshake() (*Tunnel, error) {
 		pathErrs += perr.Error()
 	}
 
-	labelToID := make(map[string]uint8, len(b.labels))
-	for i, label := range b.labels {
-		labelToID[label] = uint8(i)
-	}
-
 	return &Tunnel{
 		SessionIndexHex: fmt.Sprintf("%08x", resp.SessionIndex),
 		TunnelIP:        resp.TunnelIP,
@@ -229,14 +180,10 @@ func (b *TunnelBuilder) Handshake() (*Tunnel, error) {
 		cancel:          cancel,
 		t:               t,
 		done:            make(chan struct{}),
-		labelToID:       labelToID,
-		nextID:          uint8(len(b.paths)),
+		pathRegistry:    newRuntimePathRegistry(b.labels),
 	}, nil
 }
 
-// AttachTUN gives the tunnel its TUN device (tunFD is the fd from
-// VpnService.Builder.establish(), built using the addresses Handshake returned) and starts
-// its packet pump running in the background; call AwaitExit to block for its lifetime.
 func (tu *Tunnel) AttachTUN(tunFD int) error {
 	dev, err := tun.CreateFromFD(tunFD)
 	if err != nil {
@@ -247,7 +194,7 @@ func (tu *Tunnel) AttachTUN(tunFD int) error {
 		defer close(tu.done)
 		err := tu.t.Run(tu.ctx)
 		if tu.ctx.Err() != nil {
-			err = nil // caller-requested shutdown, not a failure
+			err = nil
 		}
 		tu.mu.Lock()
 		tu.runErr = err
@@ -256,10 +203,6 @@ func (tu *Tunnel) AttachTUN(tunFD int) error {
 	return nil
 }
 
-// AwaitExit blocks until the tunnel exits (Close was called, or an unrecoverable error occurred)
-// and returns the error message, or "" on a clean caller-requested shutdown. Gomobile has no
-// future/channel type to bind, so Kotlin is expected to call this from its own background
-// coroutine/thread rather than the caller of AttachTUN.
 func (tu *Tunnel) AwaitExit() string {
 	<-tu.done
 	tu.mu.Lock()
@@ -270,7 +213,6 @@ func (tu *Tunnel) AwaitExit() string {
 	return ""
 }
 
-// Close tears the tunnel down; AwaitExit (on whatever goroutine/thread called it) then returns.
 func (tu *Tunnel) Close() {
 	tu.mu.Lock()
 	cancel := tu.cancel
@@ -280,39 +222,33 @@ func (tu *Tunnel) Close() {
 	}
 }
 
-// addPathHandshakeTimeout bounds how long a runtime AddPathFD waits for the relay's
-// PATH_ADD ack. Generous relative to the client's own default (3s) since this call already
-// competes with live traffic on the tunnel's other path(s) for the relay's attention, unlike
-// the initial handshake where nothing else is happening yet.
 const addPathHandshakeTimeout = 5 * time.Second
 
-// AddPathFD registers a new uplink -- or a replacement for one previously retired via
-// DropPathLabel -- on an already-running tunnel, without disturbing the session or its other
-// paths. This is what lets BondifyVpnService.kt react to a ConnectivityManager
-// NetworkCallback.onAvailable firing after Handshake already completed (Wi-Fi returning from
-// a dead zone, cellular finishing a slow radio handover) instead of that uplink simply never
-// joining the bond for the rest of the session. fd is consumed exactly like
-// TunnelBuilder.AddPathFD's. label must not already be registered -- call DropPathLabel
-// first if replacing an existing one under the same label.
 func (tu *Tunnel) AddPathFD(fd int, label string) error {
 	if err := validatePathLabel(label); err != nil {
 		return err
 	}
+
+	tu.mu.Lock()
+	id, err := tu.pathRegistry.reserve(label)
+	parent := tu.ctx
+	tu.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	releaseReservation := true
+	defer func() {
+		if releaseReservation {
+			tu.mu.Lock()
+			tu.pathRegistry.release(label, id)
+			tu.mu.Unlock()
+		}
+	}()
+
 	udpConn, err := adoptUDPFd(fd, label)
 	if err != nil {
 		return err
 	}
-
-	tu.mu.Lock()
-	if _, exists := tu.labelToID[label]; exists {
-		tu.mu.Unlock()
-		_ = udpConn.Close()
-		return fmt.Errorf("mobile: path %q already registered; call DropPathLabel first", label)
-	}
-	id := tu.nextID
-	tu.nextID++
-	parent := tu.ctx
-	tu.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(parent, addPathHandshakeTimeout)
 	defer cancel()
@@ -321,20 +257,17 @@ func (tu *Tunnel) AddPathFD(fd int, label string) error {
 	}
 
 	tu.mu.Lock()
-	tu.labelToID[label] = id
+	tu.pathRegistry.commit(label, id)
 	tu.mu.Unlock()
+	releaseReservation = false
 	return nil
 }
 
-// DropPathLabel retires the uplink previously registered under label (from either
-// TunnelBuilder.AddPathFD or this type's AddPathFD), telling the relay and freeing the label
-// for a future AddPathFD call once the physical network returns. Driven by
-// NetworkCallback.onLost in BondifyVpnService.kt.
 func (tu *Tunnel) DropPathLabel(label string) error {
 	tu.mu.Lock()
-	id, ok := tu.labelToID[label]
+	id, ok := tu.pathRegistry.lookup(label)
 	if ok {
-		delete(tu.labelToID, label)
+		delete(tu.pathRegistry.labelToID, label)
 	}
 	tu.mu.Unlock()
 	if !ok {
@@ -343,8 +276,6 @@ func (tu *Tunnel) DropPathLabel(label string) error {
 	return tu.t.DropPath(id, "onLost")
 }
 
-// DiagnosticsJSON returns the same JSON shape as the desktop client's
-// /api/v1/diagnostics endpoint (core/diag), for the app's connection-status UI.
 func (tu *Tunnel) DiagnosticsJSON() (string, error) {
 	tu.mu.Lock()
 	t := tu.t
