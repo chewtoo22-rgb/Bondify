@@ -1,0 +1,31 @@
+name: Support Bundle Loopback Guard
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/collect-support-bundle.sh'
+      - 'qa/test-support-bundle-loopback.sh'
+      - '.github/workflows/support-bundle-loopback.yml'
+  push:
+    paths:
+      - 'scripts/collect-support-bundle.sh'
+      - 'qa/test-support-bundle-loopback.sh'
+      - '.github/workflows/support-bundle-loopback.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run loopback admission regression
+        run: bash qa/test-support-bundle-loopback.sh
+      - name: Enforce transport boundary
+        run: |
+          if grep -En '(^|[^[:alnum:]_])(eval|nc|netcat|socat|ssh|scp|ftp|telnet)([^[:alnum:]_]|$)' scripts/collect-support-bundle.sh; then
+            echo 'Unexpected remote transport primitive in support bundle collector.' >&2
+            exit 1
+          fi
+          grep -F 'Refusing non-loopback diagnostics URL' scripts/collect-support-bundle.sh
