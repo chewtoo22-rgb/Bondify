@@ -31,6 +31,7 @@ func TestConcurrentPathChurnAndSessionReap(t *testing.T) {
 		s := addLifecycleTestSession(t, r, uint32(100+i), byte(i+1), now, sched.StateActive, now)
 		live = append(live, s)
 	}
+	seeded := append([]*relaySession(nil), live...)
 
 	var wg sync.WaitGroup
 
@@ -104,12 +105,12 @@ func TestConcurrentPathChurnAndSessionReap(t *testing.T) {
 
 	wg.Wait()
 
-	// Final reap + cleanup of anything still indexed.
+	// Reaping races intentionally allow workers that already hold a session pointer to touch
+	// it after Worker C removes it from the live slice. That can make a previously-idle session
+	// active again before the final reap. Cleanup every seeded session explicitly so this test
+	// measures lifecycle/race safety rather than scheduler ordering between the workers.
 	_ = r.reapIdleSessions(now.Add(time.Hour), time.Minute)
-	mu.Lock()
-	remaining := append([]*relaySession(nil), live...)
-	mu.Unlock()
-	for _, s := range remaining {
+	for _, s := range seeded {
 		r.removeSession(s)
 		if s.reorderBuf != nil {
 			s.reorderBuf.Stop()
