@@ -1,0 +1,21 @@
+name: IPAM Release Boundary
+
+on:
+  pull_request:
+    paths:
+      - 'core/bond/pool.go'
+      - 'core/bond/pool_test.go'
+      - '.github/workflows/ipam-release-boundary.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ipam-release-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./core/bond
