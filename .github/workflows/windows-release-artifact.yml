@@ -66,6 +66,11 @@ jobs:
         with:
           name: bondify-windows-release-candidate
           path: dist
+      - name: Run hostile archive-layout regressions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\desktop\windows\test-release-archive-layout.ps1
       - name: Validate exact packaged artifact on Windows
         shell: pwsh
         run: |
