@@ -50,9 +50,12 @@ const DupFactor = 2
 // selectRedundantPaths returns up to n ACTIVE+BOND paths with room, ordered by ascending
 // RTT (redundancy is most valuable spent on healthy paths -- duplicating onto a path
 // that's already struggling buys little). Fewer than n eligible paths is not an error:
-// send on however many exist. A copy of the underlying slice is sorted in place, so
-// callers must pass a slice they own (e.g. from ClientTunnel.Paths(), already a copy).
+// send on however many exist. Fewer than zero requested paths is treated as an empty
+// selection instead of allowing an invalid slice bound to panic the relay.
 func selectRedundantPaths(paths []*Path, n int) []*Path {
+	if n <= 0 {
+		return nil
+	}
 	elig := make([]*Path, 0, len(paths))
 	for _, p := range paths {
 		if p.State() == sched.StateActive && p.Role() == sched.RoleBond && p.InFlight() < p.CWND() {

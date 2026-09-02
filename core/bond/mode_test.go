@@ -79,6 +79,17 @@ func TestSelectRedundantPathsExcludesIneligible(t *testing.T) {
 	}
 }
 
+func TestSelectRedundantPathsRejectsNonPositiveRequest(t *testing.T) {
+	p := NewPath(0, nil)
+	p.SetActive()
+	for _, n := range []int{0, -1, -100} {
+		got := selectRedundantPaths([]*Path{p}, n)
+		if len(got) != 0 {
+			t.Fatalf("n=%d: len(got)=%d, want 0", n, len(got))
+		}
+	}
+}
+
 // setLoss drives a path's lossEWMA toward the given ratio by repeatedly feeding
 // HandleProbeAck the same instLoss sample -- alpha=0.2 per PROTOCOL.md §6, so ~30
 // iterations converges well within floating-point-comparison precision of target. Each
