@@ -1,0 +1,30 @@
+name: Settings Interface ID Boundary
+
+on:
+  pull_request:
+    paths:
+      - 'core/settings/config.go'
+      - 'core/settings/config_test.go'
+      - '.github/workflows/settings-interface-id-boundary.yml'
+  push:
+    branches:
+      - main
+      - 'claude/**'
+    paths:
+      - 'core/settings/config.go'
+      - 'core/settings/config_test.go'
+      - '.github/workflows/settings-interface-id-boundary.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  settings-interface-id-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run settings contract tests
+        run: go test ./core/settings
