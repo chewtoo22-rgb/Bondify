@@ -1,0 +1,28 @@
+name: Diagnostics HTTP Contract
+
+on:
+  pull_request:
+    paths:
+      - 'diag/server.go'
+      - 'diag/*contract_test.go'
+      - '.github/workflows/diagnostics-http-contract.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'diag/server.go'
+      - 'diag/*contract_test.go'
+      - '.github/workflows/diagnostics-http-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostics-http-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run diagnostics HTTP contract tests
+        run: go test ./diag -run 'Test(DiagnosticsEndpointGETOnlyAndJSON|HealthEndpointGETOnly)$'
