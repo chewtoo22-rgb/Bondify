@@ -3,14 +3,14 @@ name: Diagnostics HTTP Contract
 on:
   pull_request:
     paths:
-      - 'diag/server.go'
-      - 'diag/*contract_test.go'
+      - 'core/diag/server.go'
+      - 'core/diag/*contract_test.go'
       - '.github/workflows/diagnostics-http-contract.yml'
   push:
     branches: [main]
     paths:
-      - 'diag/server.go'
-      - 'diag/*contract_test.go'
+      - 'core/diag/server.go'
+      - 'core/diag/*contract_test.go'
       - '.github/workflows/diagnostics-http-contract.yml'
 
 permissions:
@@ -25,4 +25,4 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Run diagnostics HTTP contract tests
-        run: go test ./diag -run 'Test(DiagnosticsEndpointGETOnlyAndJSON|HealthEndpointGETOnly)$'
+        run: go test ./core/diag -run 'Test(DiagnosticsEndpointGETOnlyAndJSON|HealthEndpointGETOnly)$'
